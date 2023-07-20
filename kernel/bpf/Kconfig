@@ -99,4 +99,9 @@ config BPF_LSM
 
 	  If you are unsure how to answer this question, answer N.
 
+config BPF_SBPF
+	bool "Enable sBPF"
+	help
+	  Enables sBPF.
+
 endmenu # "BPF subsystem"

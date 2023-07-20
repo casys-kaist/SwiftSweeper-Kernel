@@ -335,6 +335,10 @@ struct bpf_link_create_opts {
 		struct {
 			__u64 cookie;
 		} tracing;
+		struct {
+			void *aux_ptr;
+			size_t aux_len;
+		} sbpf;
 	};
 	size_t :0;
 };
@@ -536,6 +540,8 @@ struct bpf_test_run_opts {
 
 LIBBPF_API int bpf_prog_test_run_opts(int prog_fd,
 				      struct bpf_test_run_opts *opts);
+
+LIBBPF_API int bpf_sbpf_call_function(int prog_fd, void *arg_ptr, size_t arg_len);
 
 #ifdef __cplusplus
 } /* extern "C" */

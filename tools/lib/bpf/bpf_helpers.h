@@ -394,4 +394,12 @@ extern void bpf_iter_num_destroy(struct bpf_iter_num *it) __weak __ksym;
 )
 #endif /* bpf_repeat */
 
+#ifndef bpf_list_for_each_entry
+#define bpf_list_for_each_entry(pos, head, member) \
+	for (max_iter = 0, pos = ((__typeof__(*pos) *)bpf_uaddr_to_kaddr(((char *)(head.next) - __builtin_offsetof(__typeof__(*pos), member)), sizeof(__typeof__(*pos)))); \
+     pos != NULL && &pos->member != &(head) && max_iter < 64; \
+     pos = ((__typeof__(*(pos)) *)bpf_uaddr_to_kaddr(((char *)((pos)->member.next) - __builtin_offsetof(__typeof__(*(pos)), member)), sizeof(__typeof__(*pos)))), max_iter++) \
+
+#endif
+
 #endif

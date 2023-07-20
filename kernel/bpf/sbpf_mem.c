@@ -1,0 +1,98 @@
+#include <linux/compiler.h>
+#include <linux/gfp.h>
+#include <linux/gfp_types.h>
+#include <linux/mm_types.h>
+#include <linux/pgtable.h>
+#include <linux/errno.h>
+#include <linux/kernel.h>
+#include <linux/types.h>
+#include <linux/bpf.h>
+#include <linux/bpf_verifier.h>
+#include <linux/sbpf.h>
+#include <linux/stddef.h>
+#include <linux/mm.h>
+#include <asm/page_types.h>
+#include <asm/pgtable.h>
+#include <asm/pgtable_types.h>
+
+#include "sbpf_mem.h"
+
+BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vm_flags,
+	   unsigned long, prot, unsigned long, flags)
+{
+	struct mm_struct *mm = current->mm;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t *pte;
+	pte_t orig_pte;
+	pte_t entry;
+	pgprot_t pgprot;
+	pgprot.pgprot = prot;
+
+	address = address & PAGE_MASK;
+	pgd = pgd_offset(mm, address);
+	p4d = p4d_alloc(mm, pgd, address);
+	if (!p4d)
+		return 0;
+
+	pud = pud_alloc(mm, p4d, address);
+	if (!pud)
+		return 0;
+
+	if (pud_none(*pud) && (flags & VM_HUGEPAGE))
+		return -ENOTSUPP;
+
+	pmd = pmd_alloc(mm, pud, address);
+	if (!pmd)
+		return 0;
+
+	if (pmd_none(*pmd) && (flags & VM_HUGEPAGE))
+		return 0;
+
+	if (unlikely(pmd_none(*pmd))) {
+		pte = NULL;
+	} else {
+		pte = pte_offset_map(pmd, address);
+		orig_pte = *pte;
+
+		barrier();
+		if (pte_none(orig_pte)) {
+			pte_unmap(pte);
+			pte = NULL;
+		}
+	}
+
+	if (!pte) {
+		// do pte missing
+		if (pte_alloc(mm, pmd))
+			return 0;
+
+		if (!(vm_flags & FAULT_FLAG_WRITE)) {
+			entry = pte_mkspecial(
+				pfn_pte(my_zero_pfn(address), pgprot));
+			entry = pte_mkwrite(entry);
+			pte = pte_offset_map(pmd, address);
+		} else {
+			struct page *page = alloc_page(GFP_USER | __GFP_ZERO);
+			entry = mk_pte(page, pgprot);
+			entry = pte_sw_mkyoung(entry);
+			entry = pte_mkwrite(entry);
+			pte = pte_offset_map(pmd, address);
+		}
+		set_pte_at(mm, address, pte, entry);
+
+		return 1;
+	}
+
+	printk("COW Not implemented yet");
+
+	return 0;
+}
+
+const struct bpf_func_proto bpf_set_page_table_proto = {
+	.func = bpf_set_page_table,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+};

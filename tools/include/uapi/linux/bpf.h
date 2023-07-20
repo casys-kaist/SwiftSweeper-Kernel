@@ -846,6 +846,14 @@ union bpf_iter_link_info {
  *		Returns zero on success. On error, -1 is returned and *errno*
  *		is set appropriately.
  *
+ * BPF_SBPF_CALL_FUNCTION
+ *	Description
+ *		Call sbpf task fucntion of target fd.
+ *
+ *	Return
+ *		Returns retrun val on success. On error, -1 is returned and *errno*
+ *		is set appropriately.
+ *
  * NOTES
  *	eBPF objects (maps and programs) can be shared between processes.
  *
@@ -900,6 +908,7 @@ enum bpf_cmd {
 	BPF_ITER_CREATE,
 	BPF_LINK_DETACH,
 	BPF_PROG_BIND_MAP,
+	BPF_SBPF_CALL_FUNCTION,
 };
 
 enum bpf_map_type {
@@ -987,6 +996,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
 	BPF_PROG_TYPE_NETFILTER,
+	BPF_PROG_TYPE_SBPF,
 };
 
 enum bpf_attach_type {
@@ -1035,6 +1045,8 @@ enum bpf_attach_type {
 	BPF_TRACE_KPROBE_MULTI,
 	BPF_LSM_CGROUP,
 	BPF_STRUCT_OPS,
+	BPF_SBPF_FUNCTION,
+	BPF_SBPF_PAGE_FAULT,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1052,6 +1064,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_KPROBE_MULTI = 8,
 	BPF_LINK_TYPE_STRUCT_OPS = 9,
 	BPF_LINK_TYPE_NETFILTER = 10,
+	BPF_LINK_TYPE_SBPF = 11,
 
 	MAX_BPF_LINK_TYPE,
 };
@@ -1568,7 +1581,12 @@ union bpf_attr {
 				__s32		priority;
 				__u32		flags;
 			} netfilter;
+			struct {
+				void *aux_ptr; /* shared mapping between the user and the kernel. */
+				size_t aux_len;
+			} sbpf;
 		};
+
 	} link_create;
 
 	struct { /* struct used by BPF_LINK_UPDATE command */
@@ -1611,6 +1629,11 @@ union bpf_attr {
 		__u32		flags;		/* extra flags */
 	} prog_bind_map;
 
+	struct {
+		__u32		prog_fd;
+		void*		arg_ptr;
+		__u64		arg_len;
+	} sbpf_function;
 } __attribute__((aligned(8)));
 
 /* The description below is an attempt at providing documentation to eBPF
@@ -5558,6 +5581,31 @@ union bpf_attr {
  *		0 on success.
  *
  *		**-ENOENT** if the bpf_local_storage cannot be found.
+ *
+ * void *bpf_uaddr_to_kaddr(void *uaddr, size_t len)
+ *	Description
+ *		Transfer user address to kernel address.
+ *		For safety, ...
+ *	Return
+ *		kaddr on success.
+ *
+ *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_get_shared_page(void *kaddr, size_t len)
+ *	Description
+ *		Validate the shared kernel address.
+ *	Return
+ *		kaddr on success.
+ *
+ *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_set_page_table(void *uaddr, u64 vm_flags, unsigned long prot, u64 flags)
+ *	Description
+ *		Make entry at the faulted process page table.
+ *	Return
+ *		kaddr of uaddr on success.
+ *
+ *		**NULL** if the uaddr is invalid.
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -5772,6 +5820,9 @@ union bpf_attr {
 	FN(user_ringbuf_drain, 209, ##ctx)		\
 	FN(cgrp_storage_get, 210, ##ctx)		\
 	FN(cgrp_storage_delete, 211, ##ctx)		\
+	FN(uaddr_to_kaddr, 212, ##ctx) \
+	FN(get_shared_page, 213, ##ctx) \
+	FN(set_page_table, 214, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't

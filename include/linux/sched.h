@@ -1519,6 +1519,9 @@ struct task_struct {
 	 */
 	struct callback_head		l1d_flush_kill;
 #endif
+#ifdef CONFIG_BPF_SBPF
+	struct sbpf_task *sbpf;
+#endif
 
 #ifdef CONFIG_RV
 	/*

@@ -20,6 +20,8 @@
 #include <linux/efi.h>			/* efi_crash_gracefully_on_page_fault()*/
 #include <linux/mm_types.h>
 #include <linux/mm.h>			/* find_and_lock_vma() */
+#include <linux/bpf.h>
+#include <linux/sbpf.h>
 
 #include <asm/cpufeature.h>		/* boot_cpu_has, ...		*/
 #include <asm/traps.h>			/* dotraplinkage, ...		*/
@@ -1337,6 +1339,22 @@ void do_user_addr_fault(struct pt_regs *regs,
 #ifdef CONFIG_PER_VMA_LOCK
 	if (!(flags & FAULT_FLAG_USER))
 		goto lock_mmap;
+
+#ifdef CONFIG_BPF_SBPF
+	if (current->sbpf != NULL && current->sbpf->mm.prog != NULL) {
+		struct sbpf_vm_fault sbpf_fault;
+		sbpf_fault.vaddr = address;
+		sbpf_fault.flags = flags;
+		sbpf_fault.len = PAGE_SIZE;
+		sbpf_fault.aux = current->sbpf->mm.aux;
+
+		if(!current->sbpf->mm.prog->bpf_func(&sbpf_fault, NULL)) {
+			// Success from bpf_func always considered as an fault = 0.
+			fault = 0;
+			goto done;
+		};
+	}
+#endif
 
 	vma = lock_vma_under_rcu(mm, address);
 	if (!vma)

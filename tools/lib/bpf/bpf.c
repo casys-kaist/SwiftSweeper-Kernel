@@ -730,6 +730,10 @@ int bpf_link_create(int prog_fd, int target_fd,
 		if (!OPTS_ZEROED(opts, tracing))
 			return libbpf_err(-EINVAL);
 		break;
+	case BPF_SBPF_PAGE_FAULT:
+		attr.link_create.sbpf.aux_ptr = OPTS_GET(opts, sbpf.aux_ptr, 0);
+		attr.link_create.sbpf.aux_len = OPTS_GET(opts, sbpf.aux_len, 0);
+		break;
 	default:
 		if (!OPTS_ZEROED(opts, flags))
 			return libbpf_err(-EINVAL);
@@ -1188,5 +1192,19 @@ int bpf_prog_bind_map(int prog_fd, int map_fd,
 	attr.prog_bind_map.flags = OPTS_GET(opts, flags, 0);
 
 	ret = sys_bpf(BPF_PROG_BIND_MAP, &attr, attr_sz);
+	return libbpf_err_errno(ret);
+}
+
+int bpf_sbpf_call_function(int prog_fd, void *arg_ptr, size_t arg_len)
+{
+	union bpf_attr attr;
+	int ret;
+
+	memset(&attr, 0, sizeof(attr));
+	attr.sbpf_function.prog_fd = prog_fd;
+	attr.sbpf_function.arg_ptr = arg_ptr;
+	attr.sbpf_function.arg_len = arg_len;
+
+	ret = sys_bpf(BPF_SBPF_CALL_FUNCTION, &attr, sizeof(attr));
 	return libbpf_err_errno(ret);
 }

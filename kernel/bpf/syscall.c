@@ -8,6 +8,7 @@
 #include <linux/bpf_verifier.h>
 #include <linux/bsearch.h>
 #include <linux/btf.h>
+#include <linux/sbpf.h>
 #include <linux/syscalls.h>
 #include <linux/slab.h>
 #include <linux/sched/signal.h>
@@ -2675,6 +2676,9 @@ static int bpf_prog_load(union bpf_attr *attr, bpfptr_t uattr, u32 uattr_size)
 	perf_event_bpf_event(prog, PERF_BPF_EVENT_PROG_LOAD, 0);
 	bpf_audit_prog(prog, BPF_AUDIT_LOAD);
 
+	if (prog->type == BPF_PROG_TYPE_SBPF)
+		err = bpf_prog_load_sbpf(prog);
+
 	err = bpf_prog_new_fd(prog);
 	if (err < 0)
 		bpf_prog_put(prog);
@@ -3499,6 +3503,10 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
 		return BPF_PROG_TYPE_XDP;
 	case BPF_LSM_CGROUP:
 		return BPF_PROG_TYPE_LSM;
+	case BPF_SBPF_FUNCTION:
+		return BPF_PROG_TYPE_SBPF;
+	case BPF_SBPF_PAGE_FAULT:
+		return BPF_PROG_TYPE_SBPF;
 	default:
 		return BPF_PROG_TYPE_UNSPEC;
 	}
@@ -4671,6 +4679,11 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 		else
 			ret = bpf_kprobe_multi_link_attach(attr, prog);
 		break;
+#ifdef CONFIG_BPF_SBPF
+	case BPF_PROG_TYPE_SBPF:
+		ret = bpf_sbpf_link_attach(attr, prog);
+		break;
+#endif
 	default:
 		ret = -EINVAL;
 	}
@@ -5001,6 +5014,20 @@ out_prog_put:
 	return ret;
 }
 
+static int bpf_sbpf_call_function(union bpf_attr *attr)
+{
+	u64 arg_len = attr->sbpf_function.arg_len;
+	void *arg_ptr = attr->sbpf_function.arg_ptr;
+	long ret = 0;
+
+	if(!current->sbpf || !current->sbpf->sbpf_func.prog)
+		return -EINVAL;
+	
+	ret = call_sbpf_function(current->sbpf->sbpf_func.prog, arg_ptr, arg_len);
+
+	return ret;
+}
+
 static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size)
 {
 	union bpf_attr attr;
@@ -5148,6 +5175,9 @@ static int __sys_bpf(int cmd, bpfptr_t uattr, unsigned int size)
 		break;
 	case BPF_PROG_BIND_MAP:
 		err = bpf_prog_bind_map(&attr);
+		break;
+	case BPF_SBPF_CALL_FUNCTION:
+		err = bpf_sbpf_call_function(&attr);
 		break;
 	default:
 		err = -EINVAL;

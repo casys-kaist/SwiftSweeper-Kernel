@@ -734,6 +734,9 @@ LIBBPF_API struct bpf_link *
 bpf_program__attach_iter(const struct bpf_program *prog,
 			 const struct bpf_iter_attach_opts *opts);
 
+LIBBPF_API struct bpf_link *bpf_program__attach_sbpf(const struct bpf_program *prog, const char *func_name);
+LIBBPF_API int bpf_program__set_aux(struct bpf_program *prog, void *aux, size_t len);
+
 LIBBPF_API enum bpf_prog_type bpf_program__type(const struct bpf_program *prog);
 
 /**
