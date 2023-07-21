@@ -17,8 +17,8 @@
 
 #include "sbpf_mem.h"
 
-BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vm_flags,
-	   unsigned long, prot, unsigned long, flags)
+BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
+	   unsigned long, prot, unsigned long, vm_flags)
 {
 	struct mm_struct *mm = current->mm;
 	pgd_t *pgd;
@@ -41,14 +41,14 @@ BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vm_flags,
 	if (!pud)
 		return 0;
 
-	if (pud_none(*pud) && (flags & VM_HUGEPAGE))
+	if (pud_none(*pud) && (vm_flags & VM_HUGEPAGE))
 		return -ENOTSUPP;
 
 	pmd = pmd_alloc(mm, pud, address);
 	if (!pmd)
 		return 0;
 
-	if (pmd_none(*pmd) && (flags & VM_HUGEPAGE))
+	if (pmd_none(*pmd) && (vm_flags & VM_HUGEPAGE))
 		return 0;
 
 	if (unlikely(pmd_none(*pmd))) {
@@ -65,23 +65,26 @@ BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vm_flags,
 	}
 
 	if (!pte) {
-		// do pte missing
+		// Do pte missing
 		if (pte_alloc(mm, pmd))
 			return 0;
 
-		if (!(vm_flags & FAULT_FLAG_WRITE)) {
-			entry = pte_mkspecial(
-				pfn_pte(my_zero_pfn(address), pgprot));
-			entry = pte_mkwrite(entry);
+		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
+		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
+		if (!(vmf_flags & FAULT_FLAG_WRITE) && !(pgprot_val(pgprot) & _PAGE_RW)) {
+			entry = pfn_pte(my_zero_pfn(address), pgprot);
+			entry = pte_mkspecial(entry);
 			pte = pte_offset_map(pmd, address);
 		} else {
-			struct page *page = alloc_page(GFP_USER | __GFP_ZERO);
+			struct page *page =
+				alloc_page(GFP_USER | __GFP_ZERO);
 			entry = mk_pte(page, pgprot);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
 			pte = pte_offset_map(pmd, address);
 		}
 		set_pte_at(mm, address, pte, entry);
+		pte_unmap(pte);
 
 		return 1;
 	}

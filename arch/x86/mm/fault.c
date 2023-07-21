@@ -1336,10 +1336,6 @@ void do_user_addr_fault(struct pt_regs *regs,
 	}
 #endif
 
-#ifdef CONFIG_PER_VMA_LOCK
-	if (!(flags & FAULT_FLAG_USER))
-		goto lock_mmap;
-
 #ifdef CONFIG_BPF_SBPF
 	if (current->sbpf != NULL && current->sbpf->mm.prog != NULL) {
 		struct sbpf_vm_fault sbpf_fault;
@@ -1355,6 +1351,10 @@ void do_user_addr_fault(struct pt_regs *regs,
 		};
 	}
 #endif
+
+#ifdef CONFIG_PER_VMA_LOCK
+	if (!(flags & FAULT_FLAG_USER))
+		goto lock_mmap;
 
 	vma = lock_vma_under_rcu(mm, address);
 	if (!vma)
