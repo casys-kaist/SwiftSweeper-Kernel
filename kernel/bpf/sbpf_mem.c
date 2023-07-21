@@ -31,6 +31,9 @@ BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
 	pgprot_t pgprot;
 	pgprot.pgprot = prot;
 
+	if (!current->sbpf)
+		return 0;
+
 	address = address & PAGE_MASK;
 	pgd = pgd_offset(mm, address);
 	p4d = p4d_alloc(mm, pgd, address);
@@ -71,17 +74,34 @@ BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
 
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
 		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
-		if (!(vmf_flags & FAULT_FLAG_WRITE) && !(pgprot_val(pgprot) & _PAGE_RW)) {
+		if (!(vmf_flags & FAULT_FLAG_WRITE) &&
+		    !(pgprot_val(pgprot) & _PAGE_RW)) {
 			entry = pfn_pte(my_zero_pfn(address), pgprot);
 			entry = pte_mkspecial(entry);
 			pte = pte_offset_map(pmd, address);
 		} else {
-			struct page *page =
-				alloc_page(GFP_USER | __GFP_ZERO);
-			entry = mk_pte(page, pgprot);
+			struct folio *folio =
+				folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			struct sbpf_alloc_folio *allocated_folio;
+
+			if (!folio)
+				return 0;
+			if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
+				return 0;
+
+			entry = mk_pte(&folio->page, pgprot);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
 			pte = pte_offset_map(pmd, address);
+
+			inc_mm_counter(mm, MM_ANONPAGES);
+
+			allocated_folio = kmalloc(
+				sizeof(struct sbpf_alloc_folio), GFP_KERNEL);
+			INIT_LIST_HEAD(&allocated_folio->list);
+			allocated_folio->folio = folio;
+			list_add(&allocated_folio->list,
+				 &current->sbpf->alloc_folios);
 		}
 		set_pte_at(mm, address, pte, entry);
 		pte_unmap(pte);

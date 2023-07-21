@@ -27,15 +27,15 @@ err:
 	return ret;
 }
 
-struct sbpf_alloc_page *uaddr_to_kaddr(void *uaddr, size_t len)
+struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 {
 	struct page **pages;
 	size_t nr_pages;
 	int page_index;
 	void *kaddr = NULL;
 	int ret;
-	struct sbpf_alloc_page *allocated_page = NULL;
-	struct sbpf_alloc_page *cur = NULL;
+	struct sbpf_alloc_kmem *allocated_mem = NULL;
+	struct sbpf_alloc_kmem *cur = NULL;
 
 	if (!current->sbpf)
 		return NULL;
@@ -43,7 +43,7 @@ struct sbpf_alloc_page *uaddr_to_kaddr(void *uaddr, size_t len)
 	uaddr = untagged_addr(uaddr);
 	uaddr = (void *)PAGE_ALIGN_DOWN((uint64_t)uaddr);
 
-	list_for_each_entry(cur, &current->sbpf->allocated_pages, list) {
+	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
 		if (cur->uaddr == uaddr) {
 			return cur;
 		}
@@ -62,23 +62,23 @@ struct sbpf_alloc_page *uaddr_to_kaddr(void *uaddr, size_t len)
 
 	kaddr = vmap(pages, nr_pages, VM_MAP, PAGE_KERNEL);
 
-	allocated_page = kmalloc(sizeof(struct sbpf_alloc_page), GFP_KERNEL);
-	if (!allocated_page)
+	allocated_mem = kmalloc(sizeof(struct sbpf_alloc_kmem), GFP_KERNEL);
+	if (!allocated_mem)
 		goto err;
 
-	allocated_page->nr_pages = nr_pages;
-	allocated_page->kaddr = kaddr;
-	allocated_page->uaddr = uaddr;
-	INIT_LIST_HEAD(&allocated_page->list);
+	allocated_mem->nr_pages = nr_pages;
+	allocated_mem->kaddr = kaddr;
+	allocated_mem->uaddr = uaddr;
+	INIT_LIST_HEAD(&allocated_mem->list);
 
-	list_add_tail(&allocated_page->list, &current->sbpf->allocated_pages);
+	list_add_tail(&allocated_mem->list, &current->sbpf->alloc_kmems);
 
 err:
 	for (page_index = 0; page_index < ret; page_index++)
 		put_page(pages[page_index]);
 	kfree(pages);
 
-	return allocated_page;
+	return allocated_mem;
 }
 
 static void bpf_sbpf_link_release(struct bpf_link *link)
@@ -98,7 +98,7 @@ static const struct bpf_link_ops bpf_sbpf_link_ops = {
 
 BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 {
-	struct sbpf_alloc_page *cur;
+	struct sbpf_alloc_kmem *cur;
 	off_t offset;
 
 	if (current->sbpf == NULL || kaddr == NULL)
@@ -106,7 +106,7 @@ BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 
 	offset = kaddr - (void *)PAGE_ALIGN_DOWN((uint64_t)kaddr);
 
-	list_for_each_entry(cur, &current->sbpf->allocated_pages, list) {
+	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
 		if (cur->kaddr == (kaddr - offset) &&
 		    (len + offset) < PAGE_SIZE) {
 			return (unsigned long)(cur->kaddr + offset);
@@ -126,7 +126,7 @@ const struct bpf_func_proto bpf_get_shared_page_proto = {
 
 BPF_CALL_2(bpf_uaddr_to_kaddr, void *, uaddr, size_t, len)
 {
-	struct sbpf_alloc_page *allocated_page;
+	struct sbpf_alloc_kmem *allocated_page;
 
 	allocated_page = uaddr_to_kaddr(uaddr, len);
 	if (allocated_page != NULL && allocated_page->kaddr) {
@@ -164,7 +164,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_link_primer link_primer;
 	struct bpf_sbpf_link *link;
-	struct sbpf_alloc_page *aux_page;
+	struct sbpf_alloc_kmem *aux_page;
 	off_t offset;
 	int err;
 
@@ -233,14 +233,33 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 	if (current->sbpf == NULL)
 		return -ENOMEM;
 
-	INIT_LIST_HEAD(&current->sbpf->allocated_pages);
+	INIT_LIST_HEAD(&current->sbpf->alloc_kmems);
+	INIT_LIST_HEAD(&current->sbpf->alloc_folios);
 
 	return 0;
 }
 
 void exit_sbpf(struct task_struct *tsk)
 {
-	if (current->sbpf) {
-		pr_warn("Todo!");
+	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
+	struct sbpf_alloc_kmem *alloc_kmem, *temp_alloc_kmem;
+
+	if (!tsk->sbpf)
+		return;
+
+	list_for_each_entry_safe(alloc_kmem, temp_alloc_kmem,
+				 &tsk->sbpf->alloc_kmems, list) {
+		vfree(alloc_kmem->kaddr);
+
+		list_del(&alloc_kmem->list);
+		kfree(alloc_kmem);
+	}
+
+	list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
+				 &tsk->sbpf->alloc_folios, list) {
+		folio_put(alloc_folio->folio);
+
+		list_del(&alloc_folio->list);
+		kfree(alloc_folio);
 	}
 }

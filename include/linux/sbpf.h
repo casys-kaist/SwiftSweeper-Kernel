@@ -11,15 +11,21 @@ struct sbpf_vm_fault {
 	void *aux;
 };
 
-struct sbpf_alloc_page {
+struct sbpf_alloc_kmem {
 	size_t nr_pages;
 	void *kaddr;
 	void *uaddr;
 	struct list_head list;
 };
 
+struct sbpf_alloc_folio {
+	struct folio *folio;
+	struct list_head list;
+};
+
 struct sbpf_task {
-	struct list_head allocated_pages;
+	struct list_head alloc_kmems;
+	struct list_head alloc_folios;
 
 	// Used for handling sbpf function.
 	struct {
