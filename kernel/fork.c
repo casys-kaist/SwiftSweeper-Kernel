@@ -99,6 +99,7 @@
 #include <linux/stackprotector.h>
 #include <linux/user_events.h>
 #include <linux/iommu.h>
+#include <linux/sbpf.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -2516,6 +2517,9 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
+	retval = copy_sbpf(p);
+	if (retval)
+		goto bad_fork_sbpf;
 
 	stackleak_task_init(p);
 
@@ -2755,6 +2759,7 @@ bad_fork_free_pid:
 		free_pid(pid);
 bad_fork_cleanup_thread:
 	exit_thread(p);
+bad_fork_sbpf:
 bad_fork_cleanup_io:
 	if (p->io_context)
 		exit_io_context(p);

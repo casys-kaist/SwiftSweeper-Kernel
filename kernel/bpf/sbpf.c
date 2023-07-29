@@ -9,6 +9,7 @@
 #include <linux/stddef.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <asm/tlb.h>
 
 #include "sbpf_mem.h"
 
@@ -79,6 +80,49 @@ err:
 	kfree(pages);
 
 	return allocated_mem;
+}
+
+static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
+{
+	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
+	struct sbpf_alloc_kmem *alloc_kmem, *temp_alloc_kmem;
+	struct mmu_gather tlb;
+
+	if (!atomic_dec_and_test(&sbpf->ref)) {
+		list_for_each_entry_safe(alloc_kmem, temp_alloc_kmem,
+					 &sbpf->alloc_kmems, list) {
+			vfree(alloc_kmem->kaddr);
+
+			list_del(&alloc_kmem->list);
+			kfree(alloc_kmem);
+		}
+
+		list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
+					 &sbpf->alloc_folios, list) {
+			folio_put(alloc_folio->folio);
+
+			list_del(&alloc_folio->list);
+			kfree(alloc_folio);
+
+			dec_mm_counter(tsk->mm, MM_ANONPAGES);
+		}
+
+		tlb_gather_mmu(&tlb, tsk->mm);
+		free_pgd_range(&tlb, SBPF_USER_VADDR_START, sbpf->max_alloc_end,
+			       SBPF_USER_VADDR_START,
+			       sbpf->max_alloc_end + (1UL << 39));
+		tlb_finish_mmu(&tlb);
+	}
+}
+
+int copy_sbpf(struct task_struct *tsk)
+{
+	if (current->sbpf) {
+		tsk->sbpf = current->sbpf;
+		atomic_inc(&current->sbpf->ref);
+	}
+
+	return 0;
 }
 
 static void bpf_sbpf_link_release(struct bpf_link *link)
@@ -241,25 +285,8 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 
 void exit_sbpf(struct task_struct *tsk)
 {
-	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
-	struct sbpf_alloc_kmem *alloc_kmem, *temp_alloc_kmem;
-
 	if (!tsk->sbpf)
 		return;
 
-	list_for_each_entry_safe(alloc_kmem, temp_alloc_kmem,
-				 &tsk->sbpf->alloc_kmems, list) {
-		vfree(alloc_kmem->kaddr);
-
-		list_del(&alloc_kmem->list);
-		kfree(alloc_kmem);
-	}
-
-	list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
-				 &tsk->sbpf->alloc_folios, list) {
-		folio_put(alloc_folio->folio);
-
-		list_del(&alloc_folio->list);
-		kfree(alloc_folio);
-	}
+	release_sbpf(tsk, tsk->sbpf);
 }

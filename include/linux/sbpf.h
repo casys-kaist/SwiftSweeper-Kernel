@@ -4,6 +4,8 @@
 #include <linux/types.h>
 #include <linux/bpf.h>
 
+#define SBPF_USER_VADDR_START 0x1000
+
 struct sbpf_vm_fault {
 	unsigned long vaddr;
 	size_t len;
@@ -26,6 +28,11 @@ struct sbpf_alloc_folio {
 struct sbpf_task {
 	struct list_head alloc_kmems;
 	struct list_head alloc_folios;
+	// FixMe!. This max_alloc_end is dangerous to use with the kernel mmap struct.
+	// Have to use free_pgd_range with user space vma informations.
+	unsigned long max_alloc_end;
+	// Used for reference counting of sbpf_task produced by the fork.
+	atomic_t ref;
 
 	// Used for handling sbpf function.
 	struct {
@@ -47,6 +54,8 @@ struct bpf_sbpf_link {
 int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog);
 int bpf_prog_load_sbpf(struct bpf_prog *prog);
 int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len);
+
+int copy_sbpf(struct task_struct *tsk);
 void exit_sbpf(struct task_struct *tsk);
 
 #endif
