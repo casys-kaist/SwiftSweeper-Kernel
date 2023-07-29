@@ -143,11 +143,13 @@ static const struct bpf_link_ops bpf_sbpf_link_ops = {
 BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 {
 	struct sbpf_alloc_kmem *cur;
+	struct sbpf_task *sbpf;
 	off_t offset;
 
-	if (current->sbpf == NULL || kaddr == NULL)
+	if (!current->sbpf || !kaddr)
 		return 0;
 
+	sbpf = current->sbpf;
 	offset = kaddr - (void *)PAGE_ALIGN_DOWN((uint64_t)kaddr);
 
 	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
@@ -209,8 +211,14 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	struct bpf_link_primer link_primer;
 	struct bpf_sbpf_link *link;
 	struct sbpf_alloc_kmem *aux_page;
+	struct sbpf_task *sbpf;
 	off_t offset;
 	int err;
+
+	if (!current->sbpf)
+		return -EINVAL;
+
+	sbpf = current->sbpf;
 
 	if (attr->link_create.attach_type == BPF_SBPF_PAGE_FAULT) {
 		if (attr->link_create.sbpf.aux_ptr) {
@@ -218,14 +226,14 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 				attr->link_create.sbpf.aux_ptr, PAGE_SIZE);
 			offset = attr->link_create.sbpf.aux_ptr -
 				 aux_page->uaddr;
-			current->sbpf->mm.aux = aux_page->kaddr + offset;
+			sbpf->mm.aux = aux_page->kaddr + offset;
 		} else {
-			current->sbpf->mm.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
+			sbpf->mm.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		}
-		current->sbpf->mm.prog = prog;
+		sbpf->mm.prog = prog;
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
-		current->sbpf->sbpf_func.prog = prog;
-		current->sbpf->sbpf_func.arg =
+		sbpf->sbpf_func.prog = prog;
+		sbpf->sbpf_func.arg =
 			kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
 	}
 
@@ -279,6 +287,7 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 
 	INIT_LIST_HEAD(&current->sbpf->alloc_kmems);
 	INIT_LIST_HEAD(&current->sbpf->alloc_folios);
+	current->sbpf->max_alloc_end = SBPF_USER_VADDR_START;
 
 	return 0;
 }

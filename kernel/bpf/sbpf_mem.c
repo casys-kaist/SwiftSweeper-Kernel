@@ -14,11 +14,13 @@
 #include <asm/page_types.h>
 #include <asm/pgtable.h>
 #include <asm/pgtable_types.h>
+#include <asm/tlb.h>
+#include <linux/mman.h>
 
 #include "sbpf_mem.h"
 
-BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
-	   unsigned long, prot, unsigned long, vm_flags)
+static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
+		       unsigned long prot, unsigned long vm_flags)
 {
 	struct mm_struct *mm = current->mm;
 	pgd_t *pgd;
@@ -105,13 +107,165 @@ BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
 		}
 		set_pte_at(mm, address, pte, entry);
 		pte_unmap(pte);
-
+		if (current->sbpf->max_alloc_end < address + PAGE_SIZE) {
+			current->sbpf->max_alloc_end = address + PAGE_SIZE;
+		}
 		return 1;
 	}
 
 	printk("COW Not implemented yet");
 
 	return 0;
+}
+
+static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
+			 unsigned long prot, unsigned long flags)
+{
+	struct mm_struct *mm = current->mm;
+	struct mmu_gather tlb;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pmd_t *pmd;
+	pud_t *pud;
+	pte_t *pte;
+	pte_t ptent;
+	struct page *page;
+
+	// unmap_region
+	tlb_gather_mmu(&tlb, mm);
+
+	// unmap_vmas
+	// unmap_single_vma
+	// unmap_page_range
+	pgd = pgd_offset(mm, address);
+	if (pgd_none_or_clear_bad(pgd))
+		goto error;
+	// zap_p4d_range
+	p4d = p4d_offset(pgd, address);
+	if (p4d_none_or_clear_bad(p4d))
+		goto error;
+	// zap_pud_range
+	pud = pud_offset(p4d, address);
+	if (pud_none_or_clear_bad(pud))
+		goto error;
+	// zap_pmd_range
+	pmd = pmd_offset(pud, address);
+	if (pmd_none_or_trans_huge_or_clear_bad(pmd))
+		goto error;
+	// zap_pte_range
+	pte = pte_offset_map(pmd, address);
+	ptent = *pte;
+	if (pte_none(ptent))
+		goto error;
+	if (pte_present(ptent)) {
+		page = pte_page(ptent);
+		if (!page)
+			goto error;
+		ptep_get_and_clear(mm, address, pte);
+		tlb_remove_tlb_entry(&tlb, pte, address);
+
+		// later remove rmap & tlb
+	}
+	pte_clear(mm, address, pte);
+	// Have to delete unmaped page table by folio_put.
+
+	tlb_finish_mmu(&tlb);
+
+	return 1;
+error:
+	return 0;
+}
+
+static int bpf_set_prot_pte(unsigned long address, unsigned long vm_flags,
+			    unsigned long prot, unsigned long flags)
+{
+	struct mm_struct *mm = current->mm;
+	struct mmu_gather tlb;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pmd_t *pmd;
+	pud_t *pud;
+	pte_t *pte;
+	pte_t oldpte;
+	pte_t newpte;
+	unsigned long newprot;
+	pgprot_t new_pgprot;
+	struct page *page;
+	const int grows = prot & (PROT_GROWSDOWN | PROT_GROWSUP);
+
+	prot &= ~(PROT_GROWSDOWN | PROT_GROWSUP);
+	if (grows == (PROT_GROWSDOWN | PROT_GROWSUP)) /* can't be both */
+		return -EINVAL;
+	if (!arch_validate_prot(prot, address)) {
+		printk("error in arch_validate_prot");
+		return -EINVAL;
+	}
+	newprot = calc_vm_prot_bits(prot, 0);
+	new_pgprot = vm_get_page_prot(newprot);
+
+	tlb_gather_mmu(&tlb, mm);
+	// mprotect_fixup
+	// change_protection
+	// change_protection_range
+	pgd = pgd_offset(mm, address);
+	if (pgd_none_or_clear_bad(pgd))
+		goto error;
+	// change_p4d_range
+	p4d = p4d_offset(pgd, address);
+	if (p4d_none_or_clear_bad(p4d))
+		goto error;
+	// change_pud_range
+	pud = pud_offset(p4d, address);
+	if (pud_none_or_clear_bad(pud))
+		goto error;
+	// change_pmd_range
+	pmd = pmd_offset(pud, address);
+	if (pmd_none_or_trans_huge_or_clear_bad(pmd))
+		goto error;
+	// change_pte_range
+	pte = pte_offset_map(pmd, address);
+	oldpte = *pte;
+	if (pte_none(oldpte))
+		goto error;
+	if (pte_present(oldpte)) {
+		page = pte_page(oldpte);
+		if (!page)
+			goto error;
+		newpte = pte_modify(oldpte, new_pgprot);
+		if (prot & PROT_WRITE)
+			newpte = pte_mkwrite(newpte);
+		set_pte_at(mm, address, pte, newpte);
+
+		if (pte_needs_flush(oldpte, newpte))
+			tlb_flush_pte_range(&tlb, address, PAGE_SIZE);
+
+		// TODO: COW.
+	}
+	tlb_finish_mmu(&tlb);
+
+	return 1;
+error:
+	return 0;
+}
+
+BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
+	   unsigned long, prot, unsigned long, vm_flags)
+{
+	unsigned long op = vm_flags & 3;
+	vm_flags = vm_flags & (~3UL);
+	address = address & PAGE_MASK;
+	if (!current->sbpf)
+		return 0;
+	switch ((unsigned long)op) {
+	case PTE_MAP:
+		return bpf_map_pte(address, vmf_flags, prot, vm_flags);
+	case PTE_UNMAP:
+		return bpf_unmap_pte(address, vmf_flags, prot, vm_flags);
+	case PTE_SET_PROT:
+		return bpf_set_prot_pte(address, vmf_flags, prot, vm_flags);
+	default:
+		return 0;
+	}
 }
 
 const struct bpf_func_proto bpf_set_page_table_proto = {
