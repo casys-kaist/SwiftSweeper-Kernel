@@ -4,6 +4,8 @@
 #include <linux/types.h>
 #include <linux/bpf.h>
 
+#define SBPF_USER_VADDR_START 0x1000
+
 struct sbpf_vm_fault {
 	unsigned long vaddr;
 	size_t len;
@@ -26,6 +28,9 @@ struct sbpf_alloc_folio {
 struct sbpf_task {
 	struct list_head alloc_kmems;
 	struct list_head alloc_folios;
+	// FixMe!. This max_alloc_end is dangerous to use with the kernel mmap struct.
+	// Have to use free_pgd_range with user space vma informations.
+	unsigned long max_alloc_end;
 
 	// Used for handling sbpf function.
 	struct {

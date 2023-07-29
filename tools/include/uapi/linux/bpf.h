@@ -1583,7 +1583,7 @@ union bpf_attr {
 			} netfilter;
 			struct {
 				void *aux_ptr; /* shared mapping between the user and the kernel. */
-				size_t aux_len;
+				__u64 aux_len;
 			} sbpf;
 		};
 
@@ -7219,5 +7219,14 @@ struct bpf_iter_num {
 	 */
 	__u64 __opaque[1];
 } __attribute__((aligned(8)));
+
+/*
+ * Flags to control bpf_set_page_table behaviour.
+*/
+enum {
+	PTE_MAP,
+	PTE_UNMAP,
+	PTE_SET_PROT,
+};
 
 #endif /* _UAPI__LINUX_BPF_H__ */
