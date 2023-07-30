@@ -11,18 +11,106 @@
 #include <linux/sbpf.h>
 #include <linux/stddef.h>
 #include <linux/mm.h>
+#include <linux/mman.h>
+#include <linux/errno.h>
+#include <linux/list.h>
 #include <asm/page_types.h>
 #include <asm/pgtable.h>
 #include <asm/pgtable_types.h>
 #include <asm/tlb.h>
-#include <linux/mman.h>
 
 #include "sbpf_mem.h"
 
-static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
-		       unsigned long prot, unsigned long vm_flags)
+static struct sbpf_page *sbpf_find_by_paddr(struct sbpf_mm *mm, uint64_t paddr)
 {
-	struct mm_struct *mm = current->mm;
+	struct sbpf_page *cur;
+
+	if (!mm)
+		return NULL;
+
+	list_for_each_entry(cur, &mm->pages, list) {
+		if (cur->bpf_paddr == paddr)
+			return cur;
+	}
+
+	return NULL;
+}
+
+static struct sbpf_page *sbpf_find_by_folio(struct sbpf_mm *mm,
+					    struct folio *folio)
+{
+	struct sbpf_page *cur;
+
+	if (!mm)
+		return NULL;
+
+	list_for_each_entry(cur, &mm->pages, list) {
+		if (cur->kernel_page == folio)
+			return cur;
+	}
+
+	return NULL;
+}
+
+static int sbpf_register_folio(struct sbpf_mm *mm, uint64_t paddr,
+			       struct folio *folio)
+{
+	struct sbpf_page *spage;
+
+	if (!mm)
+		return -EINVAL;
+
+	if (sbpf_find_by_paddr(mm, paddr))
+		return -EINVAL;
+
+	spage = kmalloc(sizeof(struct sbpf_page), GFP_KERNEL);
+	spage->kernel_page = folio;
+	spage->bpf_paddr = paddr;
+
+	list_add_tail(&spage->list, &mm->pages);
+
+	return 0;
+}
+
+static struct folio *sbpf_remove_folio(struct sbpf_mm *mm, uint64_t paddr)
+{
+	struct sbpf_page *spage;
+	struct folio *folio_ret = NULL;
+
+	if (!mm)
+		return folio_ret;
+
+	spage = sbpf_find_by_paddr(mm, paddr);
+	if (!spage)
+		return folio_ret;
+
+	folio_ret = spage->kernel_page;
+	list_del_init(&spage->list);
+
+	kfree(spage);
+
+	return folio_ret;
+}
+
+void sbpf_clear_mm(struct sbpf_mm *mm)
+{
+	struct sbpf_page *spage;
+	struct sbpf_page *spage_temp;
+
+	list_for_each_entry_safe(spage, spage_temp, &mm->pages, list) {
+		
+	}
+}
+
+static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
+		       unsigned long vmf_flags, unsigned long prot,
+		       unsigned long vm_flags)
+{
+	struct mm_struct *kernel_mm = current->mm;
+	struct sbpf_mm *sbpf_mm = current->sbpf->page_fault.sbpf_mm;
+	struct folio *folio;
+	struct sbpf_page *spage;
+	struct sbpf_alloc_folio *allocated_folio;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pud_t *pud;
@@ -36,20 +124,20 @@ static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
 	if (!current->sbpf)
 		return 0;
 
-	address = address & PAGE_MASK;
-	pgd = pgd_offset(mm, address);
-	p4d = p4d_alloc(mm, pgd, address);
+	vaddr = vaddr & PAGE_MASK;
+	pgd = pgd_offset(kernel_mm, vaddr);
+	p4d = p4d_alloc(kernel_mm, pgd, vaddr);
 	if (!p4d)
 		return 0;
 
-	pud = pud_alloc(mm, p4d, address);
+	pud = pud_alloc(kernel_mm, p4d, vaddr);
 	if (!pud)
 		return 0;
 
 	if (pud_none(*pud) && (vm_flags & VM_HUGEPAGE))
 		return -ENOTSUPP;
 
-	pmd = pmd_alloc(mm, pud, address);
+	pmd = pmd_alloc(kernel_mm, pud, vaddr);
 	if (!pmd)
 		return 0;
 
@@ -59,7 +147,7 @@ static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
 	if (unlikely(pmd_none(*pmd))) {
 		pte = NULL;
 	} else {
-		pte = pte_offset_map(pmd, address);
+		pte = pte_offset_map(pmd, vaddr);
 		orig_pte = *pte;
 
 		barrier();
@@ -71,32 +159,36 @@ static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
 
 	if (!pte) {
 		// Do pte missing
-		if (pte_alloc(mm, pmd))
+		if (pte_alloc(kernel_mm, pmd))
 			return 0;
 
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
 		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
+		// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
 		if (!(vmf_flags & FAULT_FLAG_WRITE) &&
-		    !(pgprot_val(pgprot) & _PAGE_RW)) {
-			entry = pfn_pte(my_zero_pfn(address), pgprot);
+		    !(pgprot_val(pgprot) & _PAGE_RW) && !paddr) {
+			entry = pfn_pte(my_zero_pfn(vaddr), pgprot);
 			entry = pte_mkspecial(entry);
-			pte = pte_offset_map(pmd, address);
+			pte = pte_offset_map(pmd, vaddr);
 		} else {
-			struct folio *folio =
-				folio_alloc(GFP_USER | __GFP_ZERO, 0);
-			struct sbpf_alloc_folio *allocated_folio;
+			spage = sbpf_find_by_paddr(sbpf_mm, paddr);
+			if (spage) {
+				folio = spage->kernel_page;
+			} else {
+				folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			}
 
 			if (!folio)
 				return 0;
-			if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
+			if (mem_cgroup_charge(folio, kernel_mm, GFP_KERNEL))
 				return 0;
 
 			entry = mk_pte(&folio->page, pgprot);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
-			pte = pte_offset_map(pmd, address);
+			pte = pte_offset_map(pmd, vaddr);
 
-			inc_mm_counter(mm, MM_ANONPAGES);
+			inc_mm_counter(kernel_mm, MM_ANONPAGES);
 
 			allocated_folio = kmalloc(
 				sizeof(struct sbpf_alloc_folio), GFP_KERNEL);
@@ -104,11 +196,13 @@ static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
 			allocated_folio->folio = folio;
 			list_add(&allocated_folio->list,
 				 &current->sbpf->alloc_folios);
+
+			sbpf_register_folio(sbpf_mm, paddr, folio);
 		}
-		set_pte_at(mm, address, pte, entry);
+		set_pte_at(kernel_mm, vaddr, pte, entry);
 		pte_unmap(pte);
-		if (current->sbpf->max_alloc_end < address + PAGE_SIZE) {
-			current->sbpf->max_alloc_end = address + PAGE_SIZE;
+		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
+			current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
 		}
 		return 1;
 	}
@@ -121,8 +215,10 @@ static int bpf_map_pte(unsigned long address, unsigned long vmf_flags,
 static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			 unsigned long prot, unsigned long flags)
 {
-	struct mm_struct *mm = current->mm;
+	struct sbpf_mm *sbpf_mm = current->sbpf->page_fault.sbpf_mm;
+	struct mm_struct *kernel_mm = current->mm;
 	struct mmu_gather tlb;
+	struct sbpf_page *spage;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pmd_t *pmd;
@@ -132,12 +228,12 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	struct page *page;
 
 	// unmap_region
-	tlb_gather_mmu(&tlb, mm);
+	tlb_gather_mmu(&tlb, kernel_mm);
 
 	// unmap_vmas
 	// unmap_single_vma
 	// unmap_page_range
-	pgd = pgd_offset(mm, address);
+	pgd = pgd_offset(kernel_mm, address);
 	if (pgd_none_or_clear_bad(pgd))
 		goto error;
 	// zap_p4d_range
@@ -161,12 +257,16 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		page = pte_page(ptent);
 		if (!page)
 			goto error;
-		ptep_get_and_clear(mm, address, pte);
+		ptep_get_and_clear(kernel_mm, address, pte);
 		tlb_remove_tlb_entry(&tlb, pte, address);
 
+		// Fix me! Too naiive algorithm for searching and removing folios from the list.
+		spage = sbpf_find_by_folio(sbpf_mm, (struct folio *)page);
+		if (spage)
+			sbpf_remove_folio(sbpf_mm, spage->bpf_paddr);
 		// later remove rmap & tlb
 	}
-	pte_clear(mm, address, pte);
+	pte_clear(kernel_mm, address, pte);
 	// Have to delete unmaped page table by folio_put.
 
 	tlb_finish_mmu(&tlb);
@@ -248,21 +348,22 @@ error:
 	return 0;
 }
 
-BPF_CALL_4(bpf_set_page_table, unsigned long, address, unsigned long, vmf_flags,
-	   unsigned long, prot, unsigned long, vm_flags)
+BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, unsigned long, paddr,
+	   unsigned long, vmf_flags, unsigned long, prot, unsigned long,
+	   vm_flags)
 {
 	unsigned long op = vm_flags & 3;
 	vm_flags = vm_flags & (~3UL);
-	address = address & PAGE_MASK;
+	vaddr = vaddr & PAGE_MASK;
 	if (!current->sbpf)
 		return 0;
 	switch ((unsigned long)op) {
 	case PTE_MAP:
-		return bpf_map_pte(address, vmf_flags, prot, vm_flags);
+		return bpf_map_pte(vaddr, paddr, vmf_flags, prot, vm_flags);
 	case PTE_UNMAP:
-		return bpf_unmap_pte(address, vmf_flags, prot, vm_flags);
+		return bpf_unmap_pte(vaddr, vmf_flags, prot, vm_flags);
 	case PTE_SET_PROT:
-		return bpf_set_prot_pte(address, vmf_flags, prot, vm_flags);
+		return bpf_set_prot_pte(vaddr, vmf_flags, prot, vm_flags);
 	default:
 		return 0;
 	}
