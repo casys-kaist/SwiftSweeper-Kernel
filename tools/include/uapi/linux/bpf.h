@@ -5606,8 +5606,7 @@ union bpf_attr {
  *		Mapped kernel address on success.
  *
  *		**NULL** if the uaddr is invalid.
- *
- */
+  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
 	FN(map_lookup_elem, 1, ##ctx)			\
