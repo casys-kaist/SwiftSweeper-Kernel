@@ -5599,13 +5599,14 @@ union bpf_attr {
  *
  *		**NULL** if the uaddr is invalid.
  *
- * void *bpf_set_page_table(void *uaddr, void *paddr, u64 vmf_flags, unsigned long prot, u64 vm_flags)
+ * void *bpf_set_page_table(void *uaddr, void *paddr, u64 vmf_flags, u64 prot, u64 vm_flags)
  *	Description
  *		Make entry at the faulted process page table.
  *	Return
  *		Mapped kernel address on success.
  *
  *		**NULL** if the uaddr is invalid.
+ *
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
