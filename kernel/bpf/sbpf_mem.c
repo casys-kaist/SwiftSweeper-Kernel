@@ -92,23 +92,14 @@ static struct folio *sbpf_remove_folio(struct sbpf_mm *mm, uint64_t paddr)
 	return folio_ret;
 }
 
-void sbpf_clear_mm(struct sbpf_mm *mm)
-{
-	struct sbpf_page *spage;
-	struct sbpf_page *spage_temp;
-
-	list_for_each_entry_safe(spage, spage_temp, &mm->pages, list) {
-		
-	}
-}
-
+// If paddr is 0, kernel allocates the memory.
 static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		       unsigned long vmf_flags, unsigned long prot,
 		       unsigned long vm_flags)
 {
 	struct mm_struct *kernel_mm = current->mm;
 	struct sbpf_mm *sbpf_mm = current->sbpf->page_fault.sbpf_mm;
-	struct folio *folio;
+	struct folio *folio = NULL;
 	struct sbpf_page *spage;
 	struct sbpf_alloc_folio *allocated_folio;
 	pgd_t *pgd;
@@ -171,12 +162,13 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			entry = pte_mkspecial(entry);
 			pte = pte_offset_map(pmd, vaddr);
 		} else {
-			spage = sbpf_find_by_paddr(sbpf_mm, paddr);
-			if (spage) {
-				folio = spage->kernel_page;
-			} else {
-				folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			if (paddr) {
+				spage = sbpf_find_by_paddr(sbpf_mm, paddr);
+				if (spage)
+					folio = spage->kernel_page;
 			}
+			if (folio == NULL)
+				folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 
 			if (!folio)
 				return 0;
@@ -196,8 +188,6 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			allocated_folio->folio = folio;
 			list_add(&allocated_folio->list,
 				 &current->sbpf->alloc_folios);
-
-			sbpf_register_folio(sbpf_mm, paddr, folio);
 		}
 		set_pte_at(kernel_mm, vaddr, pte, entry);
 		pte_unmap(pte);
