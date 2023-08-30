@@ -41,7 +41,6 @@ struct sbpf_task {
 	} sbpf_func;
 	// Used for handling page fault.
 	struct {
-		struct sbpf_mm *sbpf_mm;
 		struct bpf_prog *prog;
 		void *aux;
 	} page_fault;

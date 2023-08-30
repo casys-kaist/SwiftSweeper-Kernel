@@ -116,9 +116,6 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			       sbpf->max_alloc_end + (1UL << 39));
 		tlb_finish_mmu(&tlb);
 
-		if (!sbpf->page_fault.sbpf_mm)
-			kfree(sbpf->page_fault.sbpf_mm);
-
 		kfree(sbpf);
 	}
 }
@@ -235,10 +232,6 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 			offset = attr->link_create.sbpf.aux_ptr -
 				 aux_page->uaddr;
 			sbpf->page_fault.aux = aux_page->kaddr + offset;
-
-			sbpf->page_fault.sbpf_mm =
-				kmalloc(sizeof(struct sbpf_mm), GFP_KERNEL);
-			INIT_LIST_HEAD(&sbpf->page_fault.sbpf_mm->pages);
 		} else {
 			sbpf->page_fault.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		}

@@ -21,86 +21,13 @@
 
 #include "sbpf_mem.h"
 
-static struct sbpf_page *sbpf_find_by_paddr(struct sbpf_mm *mm, uint64_t paddr)
-{
-	struct sbpf_page *cur;
-
-	if (!mm)
-		return NULL;
-
-	list_for_each_entry(cur, &mm->pages, list) {
-		if (cur->bpf_paddr == paddr)
-			return cur;
-	}
-
-	return NULL;
-}
-
-static struct sbpf_page *sbpf_find_by_folio(struct sbpf_mm *mm,
-					    struct folio *folio)
-{
-	struct sbpf_page *cur;
-
-	if (!mm)
-		return NULL;
-
-	list_for_each_entry(cur, &mm->pages, list) {
-		if (cur->kernel_page == folio)
-			return cur;
-	}
-
-	return NULL;
-}
-
-static int sbpf_register_folio(struct sbpf_mm *mm, uint64_t paddr,
-			       struct folio *folio)
-{
-	struct sbpf_page *spage;
-
-	if (!mm)
-		return -EINVAL;
-
-	if (sbpf_find_by_paddr(mm, paddr))
-		return -EINVAL;
-
-	spage = kmalloc(sizeof(struct sbpf_page), GFP_KERNEL);
-	spage->kernel_page = folio;
-	spage->bpf_paddr = paddr;
-
-	list_add_tail(&spage->list, &mm->pages);
-
-	return 0;
-}
-
-static struct folio *sbpf_remove_folio(struct sbpf_mm *mm, uint64_t paddr)
-{
-	struct sbpf_page *spage;
-	struct folio *folio_ret = NULL;
-
-	if (!mm)
-		return folio_ret;
-
-	spage = sbpf_find_by_paddr(mm, paddr);
-	if (!spage)
-		return folio_ret;
-
-	folio_ret = spage->kernel_page;
-	list_del_init(&spage->list);
-
-	kfree(spage);
-
-	return folio_ret;
-}
-
 // If paddr is 0, kernel allocates the memory.
 static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		       unsigned long vmf_flags, unsigned long prot,
 		       unsigned long vm_flags)
 {
 	struct mm_struct *kernel_mm = current->mm;
-	struct sbpf_mm *sbpf_mm = current->sbpf->page_fault.sbpf_mm;
 	struct folio *folio = NULL;
-	struct sbpf_page *spage;
 	struct sbpf_alloc_folio *allocated_folio;
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -163,9 +90,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			pte = pte_offset_map(pmd, vaddr);
 		} else {
 			if (paddr) {
-				spage = sbpf_find_by_paddr(sbpf_mm, paddr);
-				if (spage)
-					folio = spage->kernel_page;
+				// TODO
 			}
 			if (folio == NULL)
 				folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
@@ -205,10 +130,8 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			 unsigned long prot, unsigned long flags)
 {
-	struct sbpf_mm *sbpf_mm = current->sbpf->page_fault.sbpf_mm;
 	struct mm_struct *kernel_mm = current->mm;
 	struct mmu_gather tlb;
-	struct sbpf_page *spage;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pmd_t *pmd;
@@ -249,12 +172,6 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			goto error;
 		ptep_get_and_clear(kernel_mm, address, pte);
 		tlb_remove_tlb_entry(&tlb, pte, address);
-
-		// Fix me! Too naiive algorithm for searching and removing folios from the list.
-		spage = sbpf_find_by_folio(sbpf_mm, (struct folio *)page);
-		if (spage)
-			sbpf_remove_folio(sbpf_mm, spage->bpf_paddr);
-		// later remove rmap & tlb
 
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
