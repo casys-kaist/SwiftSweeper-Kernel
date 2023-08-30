@@ -1196,6 +1196,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	tsk->mm_cid_active = 0;
 	tsk->migrate_from_cpu = -1;
 #endif
+
+#ifdef CONFIG_BPF_SBPF
+	tsk->sbpf = NULL;
+#endif
 	return tsk;
 
 free_stack:

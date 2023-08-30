@@ -37,20 +37,23 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	int ret;
 	struct sbpf_alloc_kmem *allocated_mem = NULL;
 	struct sbpf_alloc_kmem *cur = NULL;
+	uint64_t offset;
 
 	if (!current->sbpf)
 		return NULL;
 
 	uaddr = untagged_addr(uaddr);
+	offset = (uint64_t)uaddr & (PAGE_SIZE - 1);
 	uaddr = (void *)PAGE_ALIGN_DOWN((uint64_t)uaddr);
 
+	// Todo: Optimize this entry to trie
 	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
 		if (cur->uaddr == uaddr) {
 			return cur;
 		}
 	}
 
-	len = PAGE_ALIGN(len);
+	len = PAGE_ALIGN(len + offset);
 	nr_pages = len / PAGE_SIZE;
 
 	pages = kmalloc_array(nr_pages, sizeof(*pages),
@@ -159,7 +162,7 @@ BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 
 	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
 		if (cur->kaddr == (kaddr - offset) &&
-		    (len + offset) < PAGE_SIZE) {
+		    (len + offset) < PAGE_SIZE * cur->nr_pages) {
 			return (unsigned long)(cur->kaddr + offset);
 		}
 	}

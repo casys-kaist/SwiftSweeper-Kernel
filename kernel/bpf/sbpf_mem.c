@@ -255,6 +255,8 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		if (spage)
 			sbpf_remove_folio(sbpf_mm, spage->bpf_paddr);
 		// later remove rmap & tlb
+
+		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
 	pte_clear(kernel_mm, address, pte);
 	// Have to delete unmaped page table by folio_put.
