@@ -156,6 +156,8 @@ BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 	if (!current->sbpf || !kaddr)
 		return 0;
 
+	panic("Implementation should be reversed. bpf_get_shared_page is dupulicated");
+
 	sbpf = current->sbpf;
 	offset = kaddr - (void *)PAGE_ALIGN_DOWN((uint64_t)kaddr);
 
@@ -232,7 +234,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 				attr->link_create.sbpf.aux_ptr, PAGE_SIZE);
 			offset = attr->link_create.sbpf.aux_ptr -
 				 aux_page->uaddr;
-			sbpf->page_fault.aux = aux_page->kaddr + offset;
+			sbpf->page_fault.aux = aux_page->uaddr + offset;
 		} else {
 			sbpf->page_fault.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		}
