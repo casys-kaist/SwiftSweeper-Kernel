@@ -47,11 +47,10 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	uaddr = (void *)PAGE_ALIGN_DOWN((uint64_t)uaddr);
 
 	// Todo: Optimize this entry to trie
-	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
-		if (cur->uaddr == uaddr) {
-			return cur;
-		}
-	}
+	cur = radix_tree_lookup(&current->sbpf->user_shared_pages,
+				((unsigned long)uaddr));
+	if (cur)
+		return cur;
 
 	len = PAGE_ALIGN(len + offset);
 	nr_pages = len / PAGE_SIZE;
@@ -73,9 +72,9 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	allocated_mem->nr_pages = nr_pages;
 	allocated_mem->kaddr = kaddr;
 	allocated_mem->uaddr = uaddr;
-	INIT_LIST_HEAD(&allocated_mem->list);
 
-	list_add_tail(&allocated_mem->list, &current->sbpf->alloc_kmems);
+	radix_tree_insert(&current->sbpf->user_shared_pages,
+			  (unsigned long)uaddr, allocated_mem);
 
 err:
 	for (page_index = 0; page_index < ret; page_index++)
@@ -88,16 +87,19 @@ err:
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 {
 	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
-	struct sbpf_alloc_kmem *alloc_kmem, *temp_alloc_kmem;
+	struct sbpf_alloc_kmem *alloc_kmem;
 	struct mmu_gather tlb;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
 
 	if (!atomic_dec_and_test(&sbpf->ref)) {
-		list_for_each_entry_safe(alloc_kmem, temp_alloc_kmem,
-					 &sbpf->alloc_kmems, list) {
+		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter,
+					 0) {
+			alloc_kmem = rcu_dereference_protected(*slot, true);
 			vfree(alloc_kmem->kaddr);
-
-			list_del(&alloc_kmem->list);
 			kfree(alloc_kmem);
+			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter,
+					       slot);
 		}
 
 		list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
@@ -157,11 +159,10 @@ BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 	sbpf = current->sbpf;
 	offset = kaddr - (void *)PAGE_ALIGN_DOWN((uint64_t)kaddr);
 
-	list_for_each_entry(cur, &current->sbpf->alloc_kmems, list) {
-		if (cur->kaddr == (kaddr - offset) &&
-		    (len + offset) < PAGE_SIZE * cur->nr_pages) {
-			return (unsigned long)(cur->kaddr + offset);
-		}
+	cur = radix_tree_lookup(&sbpf->user_shared_pages,
+				((unsigned long)(kaddr - offset)));
+	if (cur && (len + offset) < PAGE_SIZE * cur->nr_pages) {
+		return (unsigned long)(cur->kaddr + offset);
 	}
 
 	return 0;
@@ -290,7 +291,7 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 	if (current->sbpf == NULL)
 		return -ENOMEM;
 
-	INIT_LIST_HEAD(&current->sbpf->alloc_kmems);
+	INIT_RADIX_TREE(&current->sbpf->user_shared_pages, GFP_ATOMIC);
 	INIT_LIST_HEAD(&current->sbpf->alloc_folios);
 	current->sbpf->max_alloc_end = SBPF_USER_VADDR_START;
 

@@ -17,7 +17,6 @@ struct sbpf_alloc_kmem {
 	size_t nr_pages;
 	void *kaddr;
 	void *uaddr;
-	struct list_head list;
 };
 
 struct sbpf_alloc_folio {
@@ -26,7 +25,7 @@ struct sbpf_alloc_folio {
 };
 
 struct sbpf_task {
-	struct list_head alloc_kmems;
+	struct radix_tree_root user_shared_pages;
 	struct list_head alloc_folios;
 	// FixMe!. This max_alloc_end is dangerous to use with the kernel mmap struct.
 	// Have to use free_pgd_range with user space vma informations.
