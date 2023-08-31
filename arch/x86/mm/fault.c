@@ -1346,8 +1346,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 
 		if(!current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL)) {
 			// Success from bpf_func always considered as an fault = 0.
-			fault = 0;
-			goto done;
+			return;
 		};
 	}
 #endif

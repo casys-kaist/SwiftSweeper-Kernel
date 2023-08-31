@@ -51,6 +51,54 @@ static inline pte_t *walk_page_table_pte(struct mm_struct *mm,
 	return pte;
 }
 
+static inline int touch_page_table_pte(struct mm_struct *mm,
+				       unsigned long vaddr, pte_t **pte)
+{
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pud_t *pud;
+	pmd_t *pmd;
+	pte_t orig_pte;
+
+	vaddr = vaddr & PAGE_MASK;
+	pgd = pgd_offset(mm, vaddr);
+	p4d = p4d_alloc(mm, pgd, vaddr);
+	if (!p4d)
+		return -EINVAL;
+
+	pud = pud_alloc(mm, p4d, vaddr);
+	if (!pud)
+		return -EINVAL;
+
+	pmd = pmd_alloc(mm, pud, vaddr);
+	if (!pmd)
+		return -EINVAL;
+
+	if (unlikely(pmd_none(*pmd))) {
+		*pte = NULL;
+	} else {
+		*pte = pte_offset_map(pmd, vaddr);
+		orig_pte = **pte;
+
+		barrier();
+		if (pte_none(orig_pte)) {
+			pte_unmap(*pte);
+			*pte = NULL;
+		}
+	}
+
+	if (!*pte) {
+		if (pte_alloc(mm, pmd))
+			return -EINVAL;
+	} else {
+		*pte = pte_offset_map(pmd, vaddr);
+		return -EEXIST;
+	}
+
+	*pte = pte_offset_map(pmd, vaddr);
+	return 0;
+}
+
 // If paddr is 0, kernel allocates the memory.
 static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		       unsigned long vmf_flags, unsigned long prot,
@@ -59,12 +107,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
 	struct sbpf_alloc_folio *allocated_folio;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
+	int ret;
 	pte_t *pte;
-	pte_t orig_pte;
+	pte_t *ppte;
 	pte_t entry;
 	pgprot_t pgprot;
 	pgprot.pgprot = prot;
@@ -72,44 +117,10 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 	if (!current->sbpf)
 		return 0;
 
+	ret = touch_page_table_pte(mm, vaddr, &pte);
 	vaddr = vaddr & PAGE_MASK;
-	pgd = pgd_offset(mm, vaddr);
-	p4d = p4d_alloc(mm, pgd, vaddr);
-	if (!p4d)
-		return 0;
 
-	pud = pud_alloc(mm, p4d, vaddr);
-	if (!pud)
-		return 0;
-
-	if (pud_none(*pud) && (vm_flags & VM_HUGEPAGE))
-		return -ENOTSUPP;
-
-	pmd = pmd_alloc(mm, pud, vaddr);
-	if (!pmd)
-		return 0;
-
-	if (pmd_none(*pmd) && (vm_flags & VM_HUGEPAGE))
-		return 0;
-
-	if (unlikely(pmd_none(*pmd))) {
-		pte = NULL;
-	} else {
-		pte = pte_offset_map(pmd, vaddr);
-		orig_pte = *pte;
-
-		barrier();
-		if (pte_none(orig_pte)) {
-			pte_unmap(pte);
-			pte = NULL;
-		}
-	}
-
-	if (!pte) {
-		// Do pte missing
-		if (pte_alloc(mm, pmd))
-			return 0;
-
+	if (likely(!ret)) {
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
 		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
 		// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
@@ -117,47 +128,57 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		    !(pgprot_val(pgprot) & _PAGE_RW) && !paddr) {
 			entry = pfn_pte(my_zero_pfn(vaddr), pgprot);
 			entry = pte_mkspecial(entry);
-			pte = pte_offset_map(pmd, vaddr);
 		} else {
 			if (paddr) {
 				// TODO
-				entry = *walk_page_table_pte(mm, paddr);
-				pte = pte_offset_map(pmd, vaddr);
-			} else {
-				if (folio == NULL)
-					folio = folio_alloc(
-						GFP_USER | __GFP_ZERO, 0);
-
-				if (!folio)
-					return 0;
-				if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
-					return 0;
-
-				entry = mk_pte(&folio->page, pgprot);
-				entry = pte_sw_mkyoung(entry);
-				entry = pte_mkwrite(entry);
-				pte = pte_offset_map(pmd, vaddr);
-
-				inc_mm_counter(mm, MM_ANONPAGES);
-
-				allocated_folio =
-					kmalloc(sizeof(struct sbpf_alloc_folio),
-						GFP_KERNEL);
-				INIT_LIST_HEAD(&allocated_folio->list);
-				allocated_folio->folio = folio;
-				list_add(&allocated_folio->list,
-					 &current->sbpf->alloc_folios);
+				touch_page_table_pte(mm, paddr, &ppte);
+				if (pte_present(*ppte)) {
+					entry = *ppte;
+					goto set_pte;
+				}
 			}
+
+			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			if (unlikely(!folio))
+				return 0;
+			if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
+				return 0;
+
+			entry = mk_pte(&folio->page, pgprot);
+			entry = pte_sw_mkyoung(entry);
+			entry = pte_mkwrite(entry);
+
+			inc_mm_counter(mm, MM_ANONPAGES);
+
+			allocated_folio = kmalloc(
+				sizeof(struct sbpf_alloc_folio), GFP_KERNEL);
+			INIT_LIST_HEAD(&allocated_folio->list);
+			allocated_folio->folio = folio;
+			list_add(&allocated_folio->list,
+				 &current->sbpf->alloc_folios);
 		}
+
+set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
+		// We allocate new page, but original paddr is empty.
+		// Thus, we have to touch the page table for the paddr and set the shared pte.
+		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
+		if (paddr && folio != NULL) {
+			if (!unlikely(ppte)) {
+				printk("Error in touch_page_table_pte");
+				return 0;
+			}
+			set_pte_at(mm, paddr, ppte, entry);
+			pte_unmap(ppte);
+		}
 		pte_unmap(pte);
 		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
 			current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
 		}
 		return 1;
+	} else {
+		printk("COW Not implemented yet");
 	}
-
-	printk("COW Not implemented yet");
 
 	return 0;
 }
@@ -279,8 +300,10 @@ BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, unsigned long, paddr,
 	unsigned long op = vm_flags & 3;
 	vm_flags = vm_flags & (~3UL);
 	vaddr = vaddr & PAGE_MASK;
+
 	if (!current->sbpf)
 		return 0;
+
 	switch ((unsigned long)op) {
 	case PTE_MAP:
 		return bpf_map_pte(vaddr, paddr, vmf_flags, prot, vm_flags);
