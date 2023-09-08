@@ -131,14 +131,15 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			entry = pte_mkspecial(entry);
 		} else {
 			if (paddr) {
-				// TODO
 				// touch_page_table_pte(mm, paddr, &ppte);
 				ppte = (pte_t *)trie_search(spages, paddr);
-				if (!PTR_ERR_OR_ZERO(ppte) &&
+				if (!IS_ERR_OR_NULL(ppte) &&
 				    pte_present(*ppte)) {
 					entry = *ppte;
 					goto set_pte;
 				}
+				// Set NULL to mark ppte is not allocated yet when -EINVAL.
+				ppte = NULL;
 			}
 
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
@@ -164,10 +165,10 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
 		// We allocate new page, but original paddr is empty.
-		// Thus, we have to touch the page table for the paddr and set the shared pte.
+		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
 		if (paddr && folio != NULL) {
-			if (!unlikely(ppte)) {
+			if (unlikely(ppte)) {
 				printk("Error in touch_page_table_pte");
 				return 0;
 			}
@@ -177,6 +178,7 @@ set_pte:
 			}
 		}
 		pte_unmap(pte);
+		// TODO!. We have to elaborate the boundary mechanism.
 		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
 			current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
 		}

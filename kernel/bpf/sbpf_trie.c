@@ -75,18 +75,23 @@ int trie_remove(struct trie_node *root, uint64_t caddr)
 	return 0;
 }
 
-int trie_free(struct trie_node *root)
+int __trie_free(struct trie_node *root, int depth)
 {
-	if (root == NULL)
-		return -EINVAL;
+	if (root == NULL || depth == 3)
+		return 0;
 
 	for (int i = 0; i < TRI_SIZE; i++) {
 		if (root->trie_node[i] != NULL)
-			trie_free(root->trie_node[i]);
+			__trie_free(root->trie_node[i], depth + 1);
 	}
 
 	kfree(root);
 	return 0;
+}
+
+
+int trie_free(struct trie_node *root) {
+	return __trie_free(root, 0);
 }
 
 // Find data from trie
