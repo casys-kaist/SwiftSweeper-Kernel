@@ -105,6 +105,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		       unsigned long vm_flags)
 {
 	struct mm_struct *mm = current->mm;
+	struct trie_node *spages = current->sbpf->page_fault.spages;
 	struct folio *folio = NULL;
 	struct sbpf_alloc_folio *allocated_folio;
 	int ret;
@@ -131,7 +132,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		} else {
 			if (paddr) {
 				// TODO
-				touch_page_table_pte(mm, paddr, &ppte);
+				// touch_page_table_pte(mm, paddr, &ppte);
+				ppte = (pte_t *)trie_search(spages,
+							    (void *)paddr);
 				if (pte_present(*ppte)) {
 					entry = *ppte;
 					goto set_pte;
@@ -169,7 +172,10 @@ set_pte:
 				return 0;
 			}
 			set_pte_at(mm, paddr, ppte, entry);
-			pte_unmap(ppte);
+			if (trie_insert(spages, (void *)paddr, pte)) {
+				printk("Error in trie_insert");
+				return 0;
+			}
 		}
 		pte_unmap(pte);
 		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {

@@ -84,69 +84,6 @@ err:
 	return allocated_mem;
 }
 
-static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
-{
-	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
-	struct sbpf_alloc_kmem *alloc_kmem;
-	struct mmu_gather tlb;
-	struct radix_tree_iter iter;
-	void __rcu **slot;
-
-	if (!atomic_dec_and_test(&sbpf->ref)) {
-		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter,
-					 0) {
-			alloc_kmem = rcu_dereference_protected(*slot, true);
-			vfree(alloc_kmem->kaddr);
-			kfree(alloc_kmem);
-			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter,
-					       slot);
-		}
-
-		list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
-					 &sbpf->alloc_folios, list) {
-			folio_put(alloc_folio->folio);
-
-			list_del(&alloc_folio->list);
-			kfree(alloc_folio);
-
-			dec_mm_counter(tsk->mm, MM_ANONPAGES);
-		}
-
-		tlb_gather_mmu(&tlb, tsk->mm);
-		free_pgd_range(&tlb, SBPF_USER_VADDR_START, sbpf->max_alloc_end,
-			       SBPF_USER_VADDR_START,
-			       sbpf->max_alloc_end + (1UL << 39));
-		tlb_finish_mmu(&tlb);
-
-		kfree(sbpf);
-	}
-}
-
-int copy_sbpf(struct task_struct *tsk)
-{
-	if (current->sbpf) {
-		tsk->sbpf = current->sbpf;
-		atomic_inc(&current->sbpf->ref);
-	}
-
-	return 0;
-}
-
-static void bpf_sbpf_link_release(struct bpf_link *link)
-{
-	return;
-}
-
-static void bpf_sbpf_link_dealloc(struct bpf_link *link)
-{
-	return;
-}
-
-static const struct bpf_link_ops bpf_sbpf_link_ops = {
-	.release = bpf_sbpf_link_release,
-	.dealloc = bpf_sbpf_link_dealloc,
-};
-
 BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 {
 	struct sbpf_alloc_kmem *cur;
@@ -214,6 +151,21 @@ bpf_sbpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
 	}
 }
 
+static void bpf_sbpf_link_release(struct bpf_link *link)
+{
+	return;
+}
+
+static void bpf_sbpf_link_dealloc(struct bpf_link *link)
+{
+	return;
+}
+
+static const struct bpf_link_ops bpf_sbpf_link_ops = {
+	.release = bpf_sbpf_link_release,
+	.dealloc = bpf_sbpf_link_dealloc,
+};
+
 int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_link_primer link_primer;
@@ -238,6 +190,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		} else {
 			sbpf->page_fault.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		}
+		sbpf->page_fault.spages = kmalloc(sizeof(struct trie_node), GFP_KERNEL);
 		sbpf->page_fault.prog = prog;
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
 		sbpf->sbpf_func.prog = prog;
@@ -264,6 +217,55 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 out_sbpf:
 
 	return err;
+}
+
+static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
+{
+	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
+	struct sbpf_alloc_kmem *alloc_kmem;
+	struct mmu_gather tlb;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
+
+	if (!atomic_dec_and_test(&sbpf->ref)) {
+		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter,
+					 0) {
+			alloc_kmem = rcu_dereference_protected(*slot, true);
+			vfree(alloc_kmem->kaddr);
+			kfree(alloc_kmem);
+			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter,
+					       slot);
+		}
+
+		list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
+					 &sbpf->alloc_folios, list) {
+			folio_put(alloc_folio->folio);
+
+			list_del(&alloc_folio->list);
+			kfree(alloc_folio);
+
+			dec_mm_counter(tsk->mm, MM_ANONPAGES);
+		}
+
+		tlb_gather_mmu(&tlb, tsk->mm);
+		free_pgd_range(&tlb, SBPF_USER_VADDR_START, sbpf->max_alloc_end,
+			       SBPF_USER_VADDR_START,
+			       sbpf->max_alloc_end + (1UL << 39));
+		tlb_finish_mmu(&tlb);
+		trie_free(sbpf->page_fault.spages);
+		
+		kfree(sbpf);
+	}
+}
+
+int copy_sbpf(struct task_struct *tsk)
+{
+	if (current->sbpf) {
+		tsk->sbpf = current->sbpf;
+		atomic_inc(&current->sbpf->ref);
+	}
+
+	return 0;
 }
 
 bool verify_sbpf(int off, int size, enum bpf_access_type type,
