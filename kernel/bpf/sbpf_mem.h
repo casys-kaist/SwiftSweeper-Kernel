@@ -8,16 +8,16 @@
 struct trie_node {
 	union {
 		struct trie_node *trie_node[TRI_SIZE];
-		void *data[TRI_SIZE];
+		uint64_t data[TRI_SIZE];
 	};
 };
 
 extern const struct bpf_func_proto bpf_set_page_table_proto;
 void trie_init(struct trie_node **node);
-int trie_remove(struct trie_node *root, const void *caddr);
-int trie_insert(struct trie_node *root, const void *caddr, void *data);
-void *trie_search(struct trie_node *root, const void *caddr);
-void **trie_search_node(struct trie_node *root, const void *caddr);
+int trie_remove(struct trie_node *root, uint64_t caddr);
+int trie_insert(struct trie_node *root, uint64_t caddr, uint64_t data);
+uint64_t trie_search(struct trie_node *root, uint64_t caddr);
+void **trie_search_node(struct trie_node *root, uint64_t caddr);
 int trie_free(struct trie_node *root);
 
 #endif

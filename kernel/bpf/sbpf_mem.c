@@ -133,9 +133,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			if (paddr) {
 				// TODO
 				// touch_page_table_pte(mm, paddr, &ppte);
-				ppte = (pte_t *)trie_search(spages,
-							    (void *)paddr);
-				if (pte_present(*ppte)) {
+				ppte = (pte_t *)trie_search(spages, paddr);
+				if (!PTR_ERR_OR_ZERO(ppte) &&
+				    pte_present(*ppte)) {
 					entry = *ppte;
 					goto set_pte;
 				}
@@ -171,8 +171,7 @@ set_pte:
 				printk("Error in touch_page_table_pte");
 				return 0;
 			}
-			set_pte_at(mm, paddr, ppte, entry);
-			if (trie_insert(spages, (void *)paddr, pte)) {
+			if (trie_insert(spages, paddr, (uint64_t)pte)) {
 				printk("Error in trie_insert");
 				return 0;
 			}
