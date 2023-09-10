@@ -105,9 +105,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		       unsigned long vm_flags)
 {
 	struct mm_struct *mm = current->mm;
-	struct trie_node *spages = current->sbpf->page_fault.spages;
 	struct folio *folio = NULL;
 	struct sbpf_alloc_folio *allocated_folio;
+	struct trie_node *spages;
 	int ret;
 	pte_t *pte;
 	pte_t *ppte;
@@ -117,6 +117,8 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 
 	if (!current->sbpf)
 		return 0;
+
+	spages = current->sbpf->page_fault.spages;
 
 	ret = touch_page_table_pte(mm, vaddr, &pte);
 	vaddr = vaddr & PAGE_MASK;
@@ -131,19 +133,20 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 			entry = pte_mkspecial(entry);
 		} else {
 			if (paddr) {
+				// This optimization slows down the overall performance. Disable temporary before delete.
 				// ppte = (pte_t *)trie_search(spages, paddr);
 				// if (!IS_ERR_OR_NULL(ppte) &&
 				//     pte_present(*ppte)) {
 				// 	entry = *ppte;
 				// 	goto set_pte;
 				// }
+				// ppte = NULL;
 				touch_page_table_pte(mm, paddr, &ppte);
 				if (pte_present(*ppte)) {
 					entry = *ppte;
 					goto set_pte;
 				}
 				// Set NULL to mark ppte is not allocated yet when -EINVAL.
-				ppte = NULL;
 			}
 
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
@@ -172,10 +175,6 @@ set_pte:
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
 		if (paddr && folio != NULL) {
-			if (unlikely(ppte)) {
-				printk("Error in touch_page_table_pte");
-				return 0;
-			}
 			set_pte_at(mm, paddr, ppte, entry);
 			pte_unmap(ppte);
 			// // Caching the pte entry to the shadow page trie.
