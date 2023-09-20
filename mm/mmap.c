@@ -47,6 +47,7 @@
 #include <linux/oom.h>
 #include <linux/sched/mm.h>
 #include <linux/ksm.h>
+#include <linux/sbpf.h>
 
 #include <linux/uaccess.h>
 #include <asm/cacheflush.h>
@@ -2526,6 +2527,10 @@ int do_vmi_munmap(struct vma_iterator *vmi, struct mm_struct *mm,
 	vma = vma_find(vmi, end);
 	if (!vma)
 		return 0;
+	
+	/* Have to flush the user shared pages from the sbpf page cache. */
+	if (current->sbpf != NULL)
+		sbpf_munmap(current->sbpf, start, len);
 
 	return do_vmi_align_munmap(vmi, vma, mm, start, end, uf, downgrade);
 }

@@ -9,6 +9,7 @@
 #include <linux/stddef.h>
 #include <linux/list.h>
 #include <linux/mm.h>
+#include <linux/radix-tree.h>
 #include <asm/tlb.h>
 
 #include "sbpf_mem.h"
@@ -26,6 +27,23 @@ int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 
 err:
 	return ret;
+}
+
+int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
+{
+	unsigned long end;
+
+	end = PAGE_ALIGN(start + len);
+	start = PAGE_ALIGN_DOWN(start);
+
+	if (end <= start || stask == NULL)
+		return -EINVAL;
+
+	for (; start < end; start += PAGE_SIZE) {
+		radix_tree_delete(&stask->user_shared_pages, start);
+	}
+
+	return 0;
 }
 
 struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
