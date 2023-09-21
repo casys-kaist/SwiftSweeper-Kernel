@@ -8,13 +8,12 @@
 #define TRI_SIZE 512
 
 struct sbpf_mm_struct {
+	struct sbpf_mm_struct *parent;
 #ifdef USE_RADIX_TREE
 	struct radix_tree_root shadow_pages;
 #else
 	struct trie_node *shadow_pages;
 #endif
-
-	struct sbpf_mm_struct *parent;
 };
 
 struct trie_node {

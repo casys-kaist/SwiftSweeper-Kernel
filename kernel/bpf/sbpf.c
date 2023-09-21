@@ -206,7 +206,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 				 aux_page->uaddr;
 			sbpf->page_fault.aux = aux_page->uaddr + offset;
 		} else {
-			sbpf->page_fault.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
+			sbpf->page_fault.aux = NULL;
 		}
 		sbpf->page_fault.prog = prog;
 		sbpf->page_fault.sbpf_mm =
@@ -278,6 +278,11 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			       sbpf->max_alloc_end + (1UL << 39));
 		tlb_finish_mmu(&tlb);
 
+		if (sbpf->sbpf_func.prog) {
+			bpf_prog_put(sbpf->sbpf_func.prog);
+			kfree(sbpf->sbpf_func.arg);
+		}
+
 		if (sbpf->page_fault.sbpf_mm) {
 #ifdef USE_RADIX_TREE
 			radix_tree_for_each_slot(
@@ -289,21 +294,51 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 					&sbpf->page_fault.sbpf_mm->shadow_pages,
 					&iter, slot);
 			}
+			bpf_prog_put(sbpf->page_fault.prog);
 			kfree(sbpf->page_fault.sbpf_mm);
 #else
 			trie_free(sbpf->page_fault.sbpf_mm->shadow_pages);
 #endif
-			kfree(sbpf);
 		}
+		kfree(sbpf);
 	}
 }
 
 int copy_sbpf(struct task_struct *tsk)
 {
-	if (current->sbpf) {
-		tsk->sbpf = current->sbpf;
-		atomic_inc(&current->sbpf->ref);
+	if (current->sbpf == NULL) {
+		tsk->sbpf = NULL;
+
+		return 0;
 	}
+
+	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
+
+	if (current->sbpf->page_fault.sbpf_mm != NULL) {
+		tsk->sbpf->page_fault.aux = current->sbpf->page_fault.aux;
+		tsk->sbpf->page_fault.sbpf_mm =
+			kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
+		INIT_RADIX_TREE(&tsk->sbpf->page_fault.sbpf_mm->shadow_pages,
+				GFP_KERNEL);
+		tsk->sbpf->page_fault.sbpf_mm->parent =
+			current->sbpf->page_fault.sbpf_mm;
+		tsk->sbpf->page_fault.prog = current->sbpf->page_fault.prog;
+		bpf_prog_inc(tsk->sbpf->page_fault.prog);
+	}
+
+	if (tsk->sbpf->sbpf_func.prog != NULL) {
+		tsk->sbpf->sbpf_func.arg =
+			kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
+		memcpy(tsk->sbpf->sbpf_func.arg, current->sbpf->sbpf_func.arg,
+		       PAGE_SIZE);
+		tsk->sbpf->sbpf_func.prog = current->sbpf->sbpf_func.prog;
+		bpf_prog_inc(tsk->sbpf->sbpf_func.prog);
+	}
+
+	INIT_RADIX_TREE(&tsk->sbpf->user_shared_pages, GFP_ATOMIC);
+	INIT_LIST_HEAD(&tsk->sbpf->alloc_folios);
+	tsk->sbpf->max_alloc_end = current->sbpf->max_alloc_end;
+	atomic_inc(&current->sbpf->ref);
 
 	return 0;
 }
