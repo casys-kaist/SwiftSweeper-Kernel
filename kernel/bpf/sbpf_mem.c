@@ -107,7 +107,12 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
 	struct sbpf_alloc_folio *allocated_folio;
+#ifdef USE_RADIX_TREE
 	struct radix_tree_root *spages;
+#else
+	struct trie_node *spages;
+#endif
+
 	int ret;
 	pte_t *pte;
 	pte_t *ppte;
@@ -118,7 +123,11 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 	if (!current->sbpf)
 		return 0;
 
-	spages = &current->sbpf->page_fault.spages;
+#ifdef USE_RADIX_TREE
+	spages = &current->sbpf->page_fault.sbpf_mm->shadow_pages;
+#else
+	spages = current->sbpf->page_fault.sbpf_mm->shadow_pages;
+#endif
 
 	ret = touch_page_table_pte(mm, vaddr, &pte);
 	vaddr = vaddr & PAGE_MASK;
@@ -134,8 +143,12 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		} else {
 			if (paddr) {
 				// This optimization slows down the overall performance. Disable temporary before delete.
+#ifdef USE_RADIX_TREE
 				ppte = (pte_t *)radix_tree_lookup(spages,
 								  paddr);
+#else
+				ppte = (pte_t *)trie_search(spages, paddr);
+#endif
 				if (!IS_ERR_OR_NULL(ppte) &&
 				    pte_present(*ppte)) {
 					entry = *ppte;
@@ -172,10 +185,17 @@ set_pte:
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
 		if (paddr && folio != NULL) {
 			// Caching the pte entry to the shadow page trie.
+#ifdef USE_RADIX_TREE
 			if (radix_tree_insert(spages, paddr, pte)) {
 				printk("Error in trie_insert 0x%lx", paddr);
 				return 0;
 			}
+#else
+			if (trie_insert(spages, paddr, (uint64_t)pte)) {
+				printk("Error in trie_insert 0x%lx", paddr);
+				return 0;
+			}
+#endif
 		}
 		pte_unmap(pte);
 		// TODO!. We have to elaborate the boundary mechanism.
