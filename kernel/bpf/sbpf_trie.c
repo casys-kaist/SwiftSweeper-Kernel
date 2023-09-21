@@ -10,8 +10,7 @@
 // Initialize trie node
 void trie_init(struct trie_node **node)
 {
-	*node = kmalloc(PAGE_SIZE, GFP_KERNEL);
-	memset(*node, 0, PAGE_SIZE);
+	*node = (struct trie_node *)get_zeroed_page(GFP_KERNEL);
 }
 
 // Insert data into trie
@@ -89,8 +88,8 @@ int __trie_free(struct trie_node *root, int depth)
 	return 0;
 }
 
-
-int trie_free(struct trie_node *root) {
+int trie_free(struct trie_node *root)
+{
 	return __trie_free(root, 0);
 }
 

@@ -41,7 +41,7 @@ struct sbpf_task {
 	// Used for handling page fault.
 	struct {
 		struct bpf_prog *prog;
-		struct trie_node *spages;
+		struct radix_tree_root spages;
 		void *aux;
 	} page_fault;
 };

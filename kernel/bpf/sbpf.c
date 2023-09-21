@@ -208,7 +208,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		} else {
 			sbpf->page_fault.aux = kmalloc(PAGE_SIZE, GFP_KERNEL);
 		}
-		trie_init(&sbpf->page_fault.spages);
+		INIT_RADIX_TREE(&sbpf->page_fault.spages, GFP_ATOMIC);
 		sbpf->page_fault.prog = prog;
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
 		sbpf->sbpf_func.prog = prog;
@@ -270,7 +270,12 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			       SBPF_USER_VADDR_START,
 			       sbpf->max_alloc_end + (1UL << 39));
 		tlb_finish_mmu(&tlb);
-		trie_free(sbpf->page_fault.spages);
+		radix_tree_for_each_slot(slot, &sbpf->page_fault.spages, &iter,
+					 0) {
+			alloc_kmem = rcu_dereference_protected(*slot, true);
+			radix_tree_iter_delete(&sbpf->page_fault.spages, &iter,
+					       slot);
+		}
 		kfree(sbpf);
 	}
 }
