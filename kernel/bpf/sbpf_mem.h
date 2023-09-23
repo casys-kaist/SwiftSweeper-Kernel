@@ -9,8 +9,12 @@
 
 struct sbpf_mm_struct {
 	struct sbpf_mm_struct *parent;
+	struct list_head children;
+	struct list_head elem;
+	atomic_t refcnt;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root shadow_pages;
+	struct radix_tree_root paddr_to_pte;
+	struct radix_tree_root vaddr_to_pte;
 #else
 	struct trie_node *shadow_pages;
 #endif

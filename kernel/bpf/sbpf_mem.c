@@ -21,8 +21,7 @@
 
 #include "sbpf_mem.h"
 
-static inline pte_t *walk_page_table_pte(struct mm_struct *mm,
-					 unsigned long address)
+static inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -51,8 +50,8 @@ static inline pte_t *walk_page_table_pte(struct mm_struct *mm,
 	return pte;
 }
 
-static inline int touch_page_table_pte(struct mm_struct *mm,
-				       unsigned long vaddr, pte_t **pte)
+static inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr,
+				       pte_t **pte)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -100,13 +99,12 @@ static inline int touch_page_table_pte(struct mm_struct *mm,
 }
 
 // If paddr is 0, kernel allocates the memory.
-static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
-		       unsigned long vmf_flags, unsigned long prot,
-		       unsigned long vm_flags)
+static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long vmf_flags,
+		       unsigned long prot, unsigned long vm_flags)
 {
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
-	struct sbpf_alloc_folio *allocated_folio;
+	void __rcu **slot;
 #ifdef USE_RADIX_TREE
 	struct radix_tree_root *spages;
 #else
@@ -124,7 +122,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		return 0;
 
 #ifdef USE_RADIX_TREE
-	spages = &current->sbpf->page_fault.sbpf_mm->shadow_pages;
+	spages = &current->sbpf->page_fault.sbpf_mm->paddr_to_pte;
 #else
 	spages = current->sbpf->page_fault.sbpf_mm->shadow_pages;
 #endif
@@ -136,21 +134,22 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
 		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
 		// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
-		if (!(vmf_flags & FAULT_FLAG_WRITE) &&
-		    !(pgprot_val(pgprot) & _PAGE_RW) && !paddr) {
+		if (!(vmf_flags & FAULT_FLAG_WRITE) && !(pgprot_val(pgprot) & _PAGE_RW) &&
+		    !paddr) {
 			entry = pfn_pte(my_zero_pfn(vaddr), pgprot);
 			entry = pte_mkspecial(entry);
 		} else {
 			if (paddr) {
 				// This optimization slows down the overall performance. Disable temporary before delete.
 #ifdef USE_RADIX_TREE
-				ppte = (pte_t *)radix_tree_lookup(spages,
-								  paddr);
+				slot = radix_tree_lookup_slot(spages, paddr);
+				ppte = slot != NULL ?
+					       rcu_dereference_protected(*slot, true) :
+					       NULL;
 #else
 				ppte = (pte_t *)trie_search(spages, paddr);
 #endif
-				if (!IS_ERR_OR_NULL(ppte) &&
-				    pte_present(*ppte)) {
+				if (!IS_ERR_OR_NULL(ppte) && pte_present(*ppte)) {
 					entry = *ppte;
 					goto set_pte;
 				}
@@ -170,12 +169,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr,
 
 			inc_mm_counter(mm, MM_ANONPAGES);
 
-			allocated_folio = kmalloc(
-				sizeof(struct sbpf_alloc_folio), GFP_KERNEL);
-			INIT_LIST_HEAD(&allocated_folio->list);
-			allocated_folio->folio = folio;
-			list_add(&allocated_folio->list,
-				 &current->sbpf->alloc_folios);
+			radix_tree_insert(
+				&current->sbpf->page_fault.sbpf_mm->vaddr_to_pte, vaddr,
+				pte);
 		}
 
 set_pte:
@@ -183,11 +179,18 @@ set_pte:
 		// We allocate new page, but original paddr is empty.
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
-		if (paddr && folio != NULL) {
+		if (paddr && folio != NULL && ppte == NULL) {
 			// Caching the pte entry to the shadow page trie.
 #ifdef USE_RADIX_TREE
-			if (radix_tree_insert(spages, paddr, pte)) {
-				printk("Error in trie_insert 0x%lx", paddr);
+			if (!slot)
+				ret = radix_tree_insert(spages, paddr, pte);
+			else {
+				radix_tree_replace_slot(spages, slot, pte);
+				ret = 0;
+			}
+			if (ret) {
+				printk("Error in trie_insert 0x%lx error %d\n", paddr,
+				       ret);
 				return 0;
 			}
 #else
@@ -235,11 +238,12 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			goto error;
 		ptep_get_and_clear(mm, address, pte);
 		tlb_remove_tlb_entry(&tlb, pte, address);
+		folio_put(page_folio(page));
 
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
 	pte_clear(mm, address, pte);
-	// Have to delete unmaped page table by folio_put.
+	radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->vaddr_to_pte, address);
 
 	tlb_finish_mmu(&tlb);
 
@@ -320,9 +324,8 @@ error:
 	return 0;
 }
 
-BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, unsigned long, paddr,
-	   unsigned long, vmf_flags, unsigned long, prot, unsigned long,
-	   vm_flags)
+BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, unsigned long, paddr, unsigned long,
+	   vmf_flags, unsigned long, prot, unsigned long, vm_flags)
 {
 	unsigned long op = vm_flags & 3;
 	vm_flags = vm_flags & (~3UL);

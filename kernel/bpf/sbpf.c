@@ -73,8 +73,7 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	len = PAGE_ALIGN(len + offset);
 	nr_pages = len / PAGE_SIZE;
 
-	pages = kmalloc_array(nr_pages, sizeof(*pages),
-			      GFP_KERNEL | GFP_ATOMIC);
+	pages = kmalloc_array(nr_pages, sizeof(*pages), GFP_KERNEL | GFP_ATOMIC);
 
 	ret = get_user_pages_remote(current->mm, (unsigned long)uaddr, nr_pages,
 				    FOLL_WRITE, pages, NULL, NULL);
@@ -91,8 +90,8 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	allocated_mem->kaddr = kaddr;
 	allocated_mem->uaddr = uaddr;
 
-	radix_tree_insert(&current->sbpf->user_shared_pages,
-			  (unsigned long)uaddr, allocated_mem);
+	radix_tree_insert(&current->sbpf->user_shared_pages, (unsigned long)uaddr,
+			  allocated_mem);
 
 err:
 	for (page_index = 0; page_index < ret; page_index++)
@@ -154,8 +153,8 @@ const struct bpf_func_proto bpf_uaddr_to_kaddr_proto = {
 	.arg2_type = ARG_CONST_ALLOC_SIZE_OR_ZERO,
 };
 
-static const struct bpf_func_proto *
-bpf_sbpf_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+static const struct bpf_func_proto *bpf_sbpf_func_proto(enum bpf_func_id func_id,
+							const struct bpf_prog *prog)
 {
 	switch (func_id) {
 	case BPF_FUNC_uaddr_to_kaddr:
@@ -184,13 +183,50 @@ static const struct bpf_link_ops bpf_sbpf_link_ops = {
 	.dealloc = bpf_sbpf_link_dealloc,
 };
 
+static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
+				struct bpf_prog *prog)
+{
+	struct sbpf_alloc_kmem *aux_page;
+	off_t offset;
+
+	if (aux_ptr) {
+		aux_page = uaddr_to_kaddr(aux_ptr, PAGE_SIZE);
+		offset = aux_ptr - aux_page->uaddr;
+		sbpf->page_fault.aux = aux_page->uaddr + offset;
+	} else {
+		sbpf->page_fault.aux = NULL;
+	}
+	sbpf->page_fault.prog = prog;
+	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
+	sbpf->page_fault.sbpf_mm->parent = NULL;
+	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
+#ifdef USE_RADIX_TREE
+	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->paddr_to_pte, GFP_ATOMIC);
+	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->vaddr_to_pte, GFP_ATOMIC);
+#else
+	trie_init(&sbpf->page_fault.sbpf_mm->shadow_pages);
+#endif
+	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
+	bpf_prog_inc(prog);
+
+	return 0;
+}
+
+static int init_sbpf_function(struct sbpf_task *sbpf, const union bpf_attr *attr,
+			      struct bpf_prog *prog)
+{
+	sbpf->sbpf_func.prog = prog;
+	sbpf->sbpf_func.arg = kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
+	bpf_prog_inc(prog);
+
+	return 0;
+}
+
 int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 {
 	struct bpf_link_primer link_primer;
 	struct bpf_sbpf_link *link;
-	struct sbpf_alloc_kmem *aux_page;
 	struct sbpf_task *sbpf;
-	off_t offset;
 	int err;
 
 	if (!current->sbpf)
@@ -199,28 +235,9 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	sbpf = current->sbpf;
 
 	if (attr->link_create.attach_type == BPF_SBPF_PAGE_FAULT) {
-		if (attr->link_create.sbpf.aux_ptr) {
-			aux_page = uaddr_to_kaddr(
-				attr->link_create.sbpf.aux_ptr, PAGE_SIZE);
-			offset = attr->link_create.sbpf.aux_ptr -
-				 aux_page->uaddr;
-			sbpf->page_fault.aux = aux_page->uaddr + offset;
-		} else {
-			sbpf->page_fault.aux = NULL;
-		}
-		sbpf->page_fault.prog = prog;
-		sbpf->page_fault.sbpf_mm =
-			kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
-#ifdef USE_RADIX_TREE
-		INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->shadow_pages,
-				GFP_ATOMIC);
-#else
-		trie_init(&sbpf->page_fault.sbpf_mm->shadow_pages);
-#endif
+		init_sbpf_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
-		sbpf->sbpf_func.prog = prog;
-		sbpf->sbpf_func.arg =
-			kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
+		init_sbpf_function(sbpf, attr, prog);
 	}
 
 	link = kzalloc(sizeof(*link), GFP_USER);
@@ -228,8 +245,7 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		err = -ENOMEM;
 		goto out_sbpf;
 	}
-	bpf_link_init(&link->link, BPF_LINK_TYPE_SBPF, &bpf_sbpf_link_ops,
-		      prog);
+	bpf_link_init(&link->link, BPF_LINK_TYPE_SBPF, &bpf_sbpf_link_ops, prog);
 	link->type = attr->link_create.attach_type;
 	err = bpf_link_prime(&link->link, &link_primer);
 	if (err) {
@@ -244,38 +260,60 @@ out_sbpf:
 	return err;
 }
 
+static void release_sbpf_mm_struct(struct task_struct *tsk,
+				   struct sbpf_mm_struct *sbpf_mm)
+{
+	struct radix_tree_iter iter;
+	void __rcu **slot;
+	struct folio *folio;
+	pte_t *pte;
+
+	if (sbpf_mm == NULL)
+		return;
+
+	radix_tree_for_each_slot(slot, &sbpf_mm->vaddr_to_pte, &iter, 0) {
+		pte = rcu_dereference_protected(*slot, true);
+		if (pte_present(*pte)) {
+			folio = page_folio(pte_page(*pte));
+			folio_put(folio);
+			dec_mm_counter(tsk->mm, MM_ANONPAGES);
+		}
+		radix_tree_iter_delete(&sbpf_mm->vaddr_to_pte, &iter, slot);
+	}
+
+	// We have to fix the sbpf_mm logic.
+	if (sbpf_mm) {
+		if (atomic_dec_and_test(&sbpf_mm->refcnt)) {
+#ifdef USE_RADIX_TREE
+			radix_tree_for_each_slot(slot, &sbpf_mm->paddr_to_pte, &iter, 0) {
+				radix_tree_iter_delete(&sbpf_mm->paddr_to_pte, &iter,
+						       slot);
+			}
+#else
+			trie_free(sbpf->page_fault.sbpf_mm->shadow_pages);
+#endif
+		}
+	}
+}
+
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 {
-	struct sbpf_alloc_folio *alloc_folio, *temp_alloc_folio;
 	struct sbpf_alloc_kmem *alloc_kmem;
 	struct mmu_gather tlb;
 	struct radix_tree_iter iter;
 	void __rcu **slot;
 
 	if (!atomic_dec_and_test(&sbpf->ref)) {
-		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter,
-					 0) {
+		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter, 0) {
 			alloc_kmem = rcu_dereference_protected(*slot, true);
 			vfree(alloc_kmem->kaddr);
 			kfree(alloc_kmem);
-			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter,
-					       slot);
-		}
-
-		list_for_each_entry_safe(alloc_folio, temp_alloc_folio,
-					 &sbpf->alloc_folios, list) {
-			folio_put(alloc_folio->folio);
-
-			list_del(&alloc_folio->list);
-			kfree(alloc_folio);
-
-			dec_mm_counter(tsk->mm, MM_ANONPAGES);
+			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter, slot);
 		}
 
 		tlb_gather_mmu(&tlb, tsk->mm);
 		free_pgd_range(&tlb, SBPF_USER_VADDR_START, sbpf->max_alloc_end,
-			       SBPF_USER_VADDR_START,
-			       sbpf->max_alloc_end + (1UL << 39));
+			       SBPF_USER_VADDR_START, sbpf->max_alloc_end + (1UL << 39));
 		tlb_finish_mmu(&tlb);
 
 		if (sbpf->sbpf_func.prog) {
@@ -283,62 +321,59 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			kfree(sbpf->sbpf_func.arg);
 		}
 
-		if (sbpf->page_fault.sbpf_mm) {
-#ifdef USE_RADIX_TREE
-			radix_tree_for_each_slot(
-				slot, &sbpf->page_fault.sbpf_mm->shadow_pages,
-				&iter, 0) {
-				alloc_kmem =
-					rcu_dereference_protected(*slot, true);
-				radix_tree_iter_delete(
-					&sbpf->page_fault.sbpf_mm->shadow_pages,
-					&iter, slot);
-			}
+		if (sbpf->page_fault.prog) {
+			release_sbpf_mm_struct(tsk, sbpf->page_fault.sbpf_mm);
 			bpf_prog_put(sbpf->page_fault.prog);
 			kfree(sbpf->page_fault.sbpf_mm);
-#else
-			trie_free(sbpf->page_fault.sbpf_mm->shadow_pages);
-#endif
 		}
+
 		kfree(sbpf);
 	}
 }
 
+// Copy sbpf from current to tsk.
+// This function is used for clone.
 int copy_sbpf(struct task_struct *tsk)
 {
+	struct sbpf_task *old_sbpf;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
+
 	if (current->sbpf == NULL) {
 		tsk->sbpf = NULL;
-
 		return 0;
 	}
 
+	old_sbpf = current->sbpf;
 	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
 
-	if (current->sbpf->page_fault.sbpf_mm != NULL) {
-		tsk->sbpf->page_fault.aux = current->sbpf->page_fault.aux;
-		tsk->sbpf->page_fault.sbpf_mm =
-			kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
-		INIT_RADIX_TREE(&tsk->sbpf->page_fault.sbpf_mm->shadow_pages,
-				GFP_KERNEL);
-		tsk->sbpf->page_fault.sbpf_mm->parent =
-			current->sbpf->page_fault.sbpf_mm;
-		tsk->sbpf->page_fault.prog = current->sbpf->page_fault.prog;
-		bpf_prog_inc(tsk->sbpf->page_fault.prog);
+	if (old_sbpf->page_fault.prog != NULL) {
+		init_sbpf_page_fault(tsk->sbpf, NULL, old_sbpf->page_fault.prog);
+		tsk->sbpf->page_fault.aux = old_sbpf->page_fault.aux;
+		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
+		tsk->sbpf->page_fault.prog = old_sbpf->page_fault.prog;
+
+		list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
+			 &old_sbpf->page_fault.sbpf_mm->children);
+		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
 	}
 
-	if (tsk->sbpf->sbpf_func.prog != NULL) {
-		tsk->sbpf->sbpf_func.arg =
-			kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
-		memcpy(tsk->sbpf->sbpf_func.arg, current->sbpf->sbpf_func.arg,
-		       PAGE_SIZE);
-		tsk->sbpf->sbpf_func.prog = current->sbpf->sbpf_func.prog;
-		bpf_prog_inc(tsk->sbpf->sbpf_func.prog);
+	if (current->sbpf->sbpf_func.prog != NULL) {
+		init_sbpf_function(tsk->sbpf, NULL, current->sbpf->sbpf_func.prog);
+		memcpy(tsk->sbpf->sbpf_func.arg, current->sbpf->sbpf_func.arg, PAGE_SIZE);
 	}
 
 	INIT_RADIX_TREE(&tsk->sbpf->user_shared_pages, GFP_ATOMIC);
-	INIT_LIST_HEAD(&tsk->sbpf->alloc_folios);
 	tsk->sbpf->max_alloc_end = current->sbpf->max_alloc_end;
 	atomic_inc(&current->sbpf->ref);
+
+	// We have to clean up user shared pages in case of fork.
+	// This is because the parent process (current) will has a different page
+	// from the original process. If we do not clean up, the parent process
+	// bpf functins will have a wrong page view from the user space view.
+	radix_tree_for_each_slot(slot, &current->sbpf->user_shared_pages, &iter, 0) {
+		radix_tree_iter_delete(&current->sbpf->user_shared_pages, &iter, slot);
+	}
 
 	return 0;
 }
@@ -357,9 +392,7 @@ const struct bpf_verifier_ops sbpf_verifier_ops = {
 	.is_valid_access = verify_sbpf,
 };
 
-const struct bpf_prog_ops sbpf_prog_ops = {
-
-};
+const struct bpf_prog_ops sbpf_prog_ops = {};
 
 int bpf_prog_load_sbpf(struct bpf_prog *prog)
 {
@@ -371,7 +404,6 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 		return -ENOMEM;
 
 	INIT_RADIX_TREE(&current->sbpf->user_shared_pages, GFP_ATOMIC);
-	INIT_LIST_HEAD(&current->sbpf->alloc_folios);
 	current->sbpf->max_alloc_end = SBPF_USER_VADDR_START;
 
 	return 0;
