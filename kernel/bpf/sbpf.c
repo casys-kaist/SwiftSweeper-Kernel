@@ -14,7 +14,7 @@
 
 #include "sbpf_mem.h"
 
-int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
+int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 {
 	int ret = -EINVAL;
 
@@ -27,6 +27,78 @@ int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 
 err:
 	return ret;
+}
+
+int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
+			   unsigned int flags)
+{
+	struct sbpf_vm_fault sbpf_fault;
+	unsigned long vaddr;
+	unsigned long paddr;
+	struct folio *orig_folio;
+	struct folio *folio;
+	void __rcu **slot;
+	pte_t *pte;
+	pte_t entry;
+
+	sbpf_fault.vaddr = fault_addr;
+	sbpf_fault.flags = flags;
+	sbpf_fault.len = PAGE_SIZE;
+	sbpf_fault.aux = current->sbpf->page_fault.aux;
+
+	// Cow routine.
+	vaddr = fault_addr & PAGE_MASK;
+	slot = radix_tree_lookup_slot(&sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr);
+	if (slot != NULL) {
+		paddr = (unsigned long)rcu_dereference_protected(*slot, true);
+		slot = radix_tree_lookup_slot(&sbpf->page_fault.sbpf_mm->paddr_to_pte,
+					      paddr);
+		pte = rcu_dereference_protected(*slot, true);
+		if (pte == NULL) {
+			printk("Index lookup failed\n");
+			return -EINVAL;
+		}
+		orig_folio = page_folio(pte_page(*pte));
+
+		// When the page is shared, we have to copy the page.
+		if (folio_ref_count(orig_folio) > 1) {
+			// printk("folio ref cnt %d", folio_ref_count(orig_folio));
+			// We have to make the parent page as a read only.
+			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			if (unlikely(!folio))
+				return -ENOMEM;
+			if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
+				return -ENOMEM;
+
+			folio_copy(folio, orig_folio);
+			entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
+			entry = pte_sw_mkyoung(entry);
+			entry = pte_mkwrite(entry);
+			folio_ref_dec(orig_folio);
+			inc_mm_counter(current->mm, MM_ANONPAGES);
+
+			pte = walk_page_table_pte(current->mm, vaddr);
+			set_pte(pte, entry);
+		} else if (folio_ref_count(orig_folio) == 1) {
+			// printk("folio ref cnt %d", folio_ref_count(orig_folio));
+			// Reuse the original folio, becuase it is not shared among process.
+			pte = walk_page_table_pte(current->mm, vaddr);
+			entry = mk_pte(&orig_folio->page, PAGE_SHARED_EXEC);
+			entry = pte_sw_mkyoung(entry);
+			entry = pte_mkwrite(entry);
+			inc_mm_counter(current->mm, MM_ANONPAGES);
+
+			set_pte(pte, entry);
+		} else {
+			printk("Error in folio ref cnt %d", folio_ref_count(orig_folio));
+			return -EINVAL;
+		}
+
+		return 0;
+	}
+
+	// Call page fault function.
+	return current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
 }
 
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
@@ -202,7 +274,7 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
 #ifdef USE_RADIX_TREE
 	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->paddr_to_pte, GFP_ATOMIC);
-	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->vaddr_to_pte, GFP_ATOMIC);
+	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->vaddr_to_paddr, GFP_ATOMIC);
 #else
 	trie_init(&sbpf->page_fault.sbpf_mm->shadow_pages);
 #endif
@@ -271,14 +343,18 @@ static void release_sbpf_mm_struct(struct task_struct *tsk,
 	if (sbpf_mm == NULL)
 		return;
 
-	radix_tree_for_each_slot(slot, &sbpf_mm->vaddr_to_pte, &iter, 0) {
+	radix_tree_for_each_slot(slot, &sbpf_mm->paddr_to_pte, &iter, 0) {
 		pte = rcu_dereference_protected(*slot, true);
 		if (pte_present(*pte)) {
 			folio = page_folio(pte_page(*pte));
 			folio_put(folio);
 			dec_mm_counter(tsk->mm, MM_ANONPAGES);
 		}
-		radix_tree_iter_delete(&sbpf_mm->vaddr_to_pte, &iter, slot);
+		radix_tree_iter_delete(&sbpf_mm->paddr_to_pte, &iter, slot);
+	}
+
+	radix_tree_for_each_slot(slot, &sbpf_mm->vaddr_to_paddr, &iter, 0) {
+		radix_tree_iter_delete(&sbpf_mm->vaddr_to_paddr, &iter, slot);
 	}
 
 	// We have to fix the sbpf_mm logic.
@@ -337,7 +413,10 @@ int copy_sbpf(struct task_struct *tsk)
 {
 	struct sbpf_task *old_sbpf;
 	struct radix_tree_iter iter;
+	struct folio *folio;
 	void __rcu **slot;
+	pte_t *pte;
+	pte_t *cpte;
 
 	if (current->sbpf == NULL) {
 		tsk->sbpf = NULL;
@@ -356,6 +435,32 @@ int copy_sbpf(struct task_struct *tsk)
 		list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
 			 &old_sbpf->page_fault.sbpf_mm->children);
 		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
+
+		/* Copy the pte from the parent process and make the parent pte as an write protected. */
+		radix_tree_for_each_slot(
+			slot, &old_sbpf->page_fault.sbpf_mm->paddr_to_pte, &iter, 0) {
+			pte = *slot;
+			folio = page_folio(pte_page(*pte));
+			folio_ref_inc(folio);
+			ptep_set_wrprotect(current->mm, iter.index, pte);
+			cpte = sbpf_set_write_protected_pte(tsk, iter.index,
+							    pte_pgprot(*pte), folio);
+			if (cpte != NULL)
+				radix_tree_insert(
+					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_pte,
+					iter.index, cpte);
+		}
+
+		radix_tree_for_each_slot(
+			slot, &old_sbpf->page_fault.sbpf_mm->vaddr_to_paddr, &iter, 0) {
+			pte = walk_page_table_pte(current->mm, iter.index);
+			ptep_set_wrprotect(current->mm, iter.index, pte);
+			cpte = sbpf_set_write_protected_pte(tsk, iter.index,
+							    pte_pgprot(*pte),
+							    page_folio(pte_page(*pte)));
+			radix_tree_insert(&tsk->sbpf->page_fault.sbpf_mm->vaddr_to_paddr,
+					  iter.index, *slot);
+		}
 	}
 
 	if (current->sbpf->sbpf_func.prog != NULL) {

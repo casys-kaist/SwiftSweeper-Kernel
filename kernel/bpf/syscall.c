@@ -5023,7 +5023,7 @@ static int bpf_sbpf_call_function(union bpf_attr *attr)
 	if(!current->sbpf || !current->sbpf->sbpf_func.prog)
 		return -EINVAL;
 	
-	ret = call_sbpf_function(current->sbpf->sbpf_func.prog, arg_ptr, arg_len);
+	ret = sbpf_call_function(current->sbpf->sbpf_func.prog, arg_ptr, arg_len);
 
 	return ret;
 }

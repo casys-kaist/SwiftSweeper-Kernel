@@ -14,7 +14,7 @@ struct sbpf_mm_struct {
 	atomic_t refcnt;
 #ifdef USE_RADIX_TREE
 	struct radix_tree_root paddr_to_pte;
-	struct radix_tree_root vaddr_to_pte;
+	struct radix_tree_root vaddr_to_paddr;
 #else
 	struct trie_node *shadow_pages;
 #endif
@@ -27,6 +27,8 @@ struct trie_node {
 	};
 };
 
+inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address);
+
 extern const struct bpf_func_proto bpf_set_page_table_proto;
 void trie_init(struct trie_node **node);
 int trie_remove(struct trie_node *root, uint64_t caddr);
@@ -34,5 +36,7 @@ int trie_insert(struct trie_node *root, uint64_t caddr, uint64_t data);
 uint64_t trie_search(struct trie_node *root, uint64_t caddr);
 void **trie_search_node(struct trie_node *root, uint64_t caddr);
 int trie_free(struct trie_node *root);
+pte_t *sbpf_set_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
+				    pgprot_t pgprot, struct folio *folio);
 
 #endif

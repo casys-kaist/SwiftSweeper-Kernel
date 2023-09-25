@@ -47,7 +47,9 @@ struct bpf_sbpf_link {
 
 int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog);
 int bpf_prog_load_sbpf(struct bpf_prog *prog);
-int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len);
+int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len);
+int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
+			   unsigned int flags);
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len);
 
 int copy_sbpf(struct task_struct *tsk);

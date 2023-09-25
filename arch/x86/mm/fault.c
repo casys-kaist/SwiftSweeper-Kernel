@@ -1338,16 +1338,8 @@ void do_user_addr_fault(struct pt_regs *regs,
 
 #ifdef CONFIG_BPF_SBPF
 	if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
-		struct sbpf_vm_fault sbpf_fault;
-		sbpf_fault.vaddr = address;
-		sbpf_fault.flags = flags;
-		sbpf_fault.len = PAGE_SIZE;
-		sbpf_fault.aux = current->sbpf->page_fault.aux;
-
-		if(!current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL)) {
-			// Success from bpf_func always considered as an fault = 0.
+		if(!sbpf_handle_page_fault(current->sbpf, address, flags))
 			return;
-		};
 	}
 #endif
 

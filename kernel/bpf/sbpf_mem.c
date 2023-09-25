@@ -21,7 +21,7 @@
 
 #include "sbpf_mem.h"
 
-static inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address)
+inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -50,8 +50,7 @@ static inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long add
 	return pte;
 }
 
-static inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr,
-				       pte_t **pte)
+inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr, pte_t **pte)
 {
 	pgd_t *pgd;
 	p4d_t *p4d;
@@ -98,6 +97,29 @@ static inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr
 	return 0;
 }
 
+pte_t *sbpf_set_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
+				    pgprot_t pgprot, struct folio *folio)
+{
+	int ret;
+	pte_t *pte;
+	pte_t entry;
+
+	ret = touch_page_table_pte(tsk->mm, vaddr, &pte);
+
+	if (likely(!ret)) {
+		entry = mk_pte(&folio->page, pgprot);
+		entry = pte_sw_mkyoung(entry);
+		entry = pte_wrprotect(entry);
+		set_pte_at(tsk->mm, vaddr, pte, entry);
+		pte_unmap(pte);
+	} else {
+		printk("Invalid pte at the new task %d\n", tsk->pid);
+		return NULL;
+	}
+
+	return pte;
+}
+
 // If paddr is 0, kernel allocates the memory.
 static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long vmf_flags,
 		       unsigned long prot, unsigned long vm_flags)
@@ -106,7 +128,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 	struct folio *folio = NULL;
 	void __rcu **slot;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root *spages;
+	struct radix_tree_root *paddr_to_pte;
 #else
 	struct trie_node *spages;
 #endif
@@ -122,7 +144,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 		return 0;
 
 #ifdef USE_RADIX_TREE
-	spages = &current->sbpf->page_fault.sbpf_mm->paddr_to_pte;
+	paddr_to_pte = &current->sbpf->page_fault.sbpf_mm->paddr_to_pte;
 #else
 	spages = current->sbpf->page_fault.sbpf_mm->shadow_pages;
 #endif
@@ -142,7 +164,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			if (paddr) {
 				// This optimization slows down the overall performance. Disable temporary before delete.
 #ifdef USE_RADIX_TREE
-				slot = radix_tree_lookup_slot(spages, paddr);
+				slot = radix_tree_lookup_slot(paddr_to_pte, paddr);
 				ppte = slot != NULL ?
 					       rcu_dereference_protected(*slot, true) :
 					       NULL;
@@ -168,30 +190,40 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			entry = pte_mkwrite(entry);
 
 			inc_mm_counter(mm, MM_ANONPAGES);
-
-			radix_tree_insert(
-				&current->sbpf->page_fault.sbpf_mm->vaddr_to_pte, vaddr,
-				pte);
 		}
 
 set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
+		// Anonymous mapping.
+		if (paddr == 0) {
+			ret = radix_tree_insert(
+				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
+				(void *)vaddr);
+			paddr = vaddr;
+		} else {
+			ret = radix_tree_insert(
+				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
+				(void *)paddr);
+		}
+		if (unlikely(ret)) {
+			printk("Error in radix_tree_insert 0x%lx error %d\n", vaddr, ret);
+			return 0;
+		}
 		// We allocate new page, but original paddr is empty.
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
 		if (paddr && folio != NULL && ppte == NULL) {
 			// Caching the pte entry to the shadow page trie.
 #ifdef USE_RADIX_TREE
-			if (!slot)
-				ret = radix_tree_insert(spages, paddr, pte);
-			else {
-				radix_tree_replace_slot(spages, slot, pte);
-				ret = 0;
-			}
-			if (ret) {
-				printk("Error in trie_insert 0x%lx error %d\n", paddr,
-				       ret);
-				return 0;
+			if (!slot) {
+				ret = radix_tree_insert(paddr_to_pte, paddr, pte);
+				if (unlikely(ret)) {
+					printk("Error in trie_insert 0x%lx error %d\n",
+					       paddr, ret);
+					return 0;
+				}
+			} else {
+				radix_tree_replace_slot(paddr_to_pte, slot, pte);
 			}
 #else
 			if (trie_insert(spages, paddr, (uint64_t)pte)) {
@@ -207,7 +239,7 @@ set_pte:
 		}
 		return 1;
 	} else {
-		printk("COW Not implemented yet");
+		// printk("COW Not implemented yet");
 	}
 
 	return 0;
@@ -218,6 +250,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 {
 	struct mm_struct *mm = current->mm;
 	struct mmu_gather tlb;
+	unsigned long paddr;
 	pte_t *pte;
 	pte_t ptent;
 	struct page *page;
@@ -243,7 +276,12 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
 	pte_clear(mm, address, pte);
-	radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->vaddr_to_pte, address);
+	paddr = (unsigned long)radix_tree_delete(
+		&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, address);
+	if (folio_ref_zero_or_close_to_overflow(page_folio(page)) && paddr != 0) {
+		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_pte,
+				  paddr);
+	}
 
 	tlb_finish_mmu(&tlb);
 
