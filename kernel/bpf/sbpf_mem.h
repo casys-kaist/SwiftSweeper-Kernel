@@ -13,7 +13,7 @@ struct sbpf_mm_struct {
 	struct list_head elem;
 	atomic_t refcnt;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root paddr_to_pte;
+	struct radix_tree_root paddr_to_folio;
 	struct radix_tree_root vaddr_to_paddr;
 #else
 	struct trie_node *shadow_pages;

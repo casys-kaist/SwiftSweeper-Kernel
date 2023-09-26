@@ -126,16 +126,16 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 {
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
-	void __rcu **slot;
+	void __rcu **slot = NULL;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root *paddr_to_pte;
+	struct radix_tree_root *paddr_to_folio;
 #else
 	struct trie_node *spages;
 #endif
 
 	int ret;
+	int new_folio = 0;
 	pte_t *pte;
-	pte_t *ppte;
 	pte_t entry;
 	pgprot_t pgprot;
 	pgprot.pgprot = prot;
@@ -144,13 +144,14 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 		return 0;
 
 #ifdef USE_RADIX_TREE
-	paddr_to_pte = &current->sbpf->page_fault.sbpf_mm->paddr_to_pte;
+	paddr_to_folio = &current->sbpf->page_fault.sbpf_mm->paddr_to_folio;
 #else
 	spages = current->sbpf->page_fault.sbpf_mm->shadow_pages;
 #endif
 
-	ret = touch_page_table_pte(mm, vaddr, &pte);
 	vaddr = vaddr & PAGE_MASK;
+	paddr = paddr & PAGE_MASK;
+	ret = touch_page_table_pte(mm, vaddr, &pte);
 
 	if (likely(!ret)) {
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
@@ -164,22 +165,24 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			if (paddr) {
 				// This optimization slows down the overall performance. Disable temporary before delete.
 #ifdef USE_RADIX_TREE
-				slot = radix_tree_lookup_slot(paddr_to_pte, paddr);
-				ppte = slot != NULL ?
-					       rcu_dereference_protected(*slot, true) :
-					       NULL;
+				slot = radix_tree_lookup_slot(paddr_to_folio, paddr);
+				folio = slot != NULL ?
+						rcu_dereference_protected(*slot, true) :
+						NULL;
 #else
 				ppte = (pte_t *)trie_search(spages, paddr);
 #endif
-				if (!IS_ERR_OR_NULL(ppte) && pte_present(*ppte)) {
-					entry = *ppte;
+				if (!IS_ERR_OR_NULL(folio) &&
+				    folio_ref_count(folio) > 0) {
+					entry = mk_pte(&folio->page, pgprot);
+					entry = pte_sw_mkyoung(entry);
+					entry = pte_mkwrite(entry);
 					goto set_pte;
 				}
-				// Set NULL to mark ppte is not allocated yet when -EINVAL.
-				ppte = NULL;
 			}
 
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			new_folio = 1;
 			if (unlikely(!folio))
 				return 0;
 			if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
@@ -212,18 +215,18 @@ set_pte:
 		// We allocate new page, but original paddr is empty.
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
-		if (paddr && folio != NULL && ppte == NULL) {
+		if (paddr && folio != NULL && new_folio) {
 			// Caching the pte entry to the shadow page trie.
 #ifdef USE_RADIX_TREE
 			if (!slot) {
-				ret = radix_tree_insert(paddr_to_pte, paddr, pte);
+				ret = radix_tree_insert(paddr_to_folio, paddr, folio);
 				if (unlikely(ret)) {
 					printk("Error in trie_insert 0x%lx error %d\n",
 					       paddr, ret);
 					return 0;
 				}
 			} else {
-				radix_tree_replace_slot(paddr_to_pte, slot, pte);
+				radix_tree_replace_slot(paddr_to_folio, slot, folio);
 			}
 #else
 			if (trie_insert(spages, paddr, (uint64_t)pte)) {
@@ -261,6 +264,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	// unmap_vmas
 	// unmap_single_vma
 	// unmap_page_range
+	address = address & PAGE_MASK;
 	pte = walk_page_table_pte(mm, address);
 	ptent = *pte;
 	if (pte_none(ptent))
@@ -279,7 +283,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	paddr = (unsigned long)radix_tree_delete(
 		&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, address);
 	if (folio_ref_zero_or_close_to_overflow(page_folio(page)) && paddr != 0) {
-		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_pte,
+		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				  paddr);
 	}
 
