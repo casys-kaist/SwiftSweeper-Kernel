@@ -1088,11 +1088,6 @@ static inline bool page_expected_state(struct page *page,
 #endif
 			(page->flags & check_flags)))
 		return false;
-	
-#ifdef CONFIG_BPF_SBPF
-	if (unlikely(page->reverse_map))
-		return false;
-#endif
 
 	return true;
 }
@@ -1117,12 +1112,6 @@ static const char *page_bad_reason(struct page *page, unsigned long flags)
 	if (unlikely(page->memcg_data))
 		bad_reason = "page still charged to cgroup";
 #endif
-
-#ifdef CONFIG_BPF_SBPF
-	if (unlikely(page->reverse_map))
-		bad_reason = "page still have reverse map of sbpf";
-#endif
-
 	return bad_reason;
 }
 

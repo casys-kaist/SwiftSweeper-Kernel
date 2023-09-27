@@ -1,4 +1,3 @@
-#include <linux/rbtree.h>
 #include <linux/compiler.h>
 #include <linux/gfp.h>
 #include <linux/gfp_types.h>
@@ -21,25 +20,6 @@
 #include <asm/tlb.h>
 
 #include "sbpf_mem.h"
-
-static struct sbpf_reverse_map *search_reverse_map_rb(struct rb_root *root,
-						      unsigned long vaddr)
-{
-	struct rb_node *node = root->rb_node;
-	struct sbpf_reverse_map *reverse_map;
-
-	while (node) {
-		reverse_map = rb_entry(node, struct sbpf_reverse_map, node);
-		if (vaddr < reverse_map->vaddr)
-			node = node->rb_left;
-		else if (vaddr > reverse_map->vaddr)
-			node = node->rb_right;
-		else
-			return reverse_map;
-	}
-
-	return NULL;
-}
 
 inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address)
 {
@@ -146,9 +126,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 {
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
-	struct sbpf_reverse_map *reverse_map;
+	void __rcu **slot = NULL;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root *shadow_pages;
+	struct radix_tree_root *paddr_to_folio;
 #else
 	struct trie_node *spages;
 #endif
@@ -156,7 +136,6 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 	int ret;
 	int new_folio = 0;
 	pte_t *pte;
-	pte_t *ppte;
 	pte_t entry;
 	pgprot_t pgprot;
 	pgprot.pgprot = prot;
@@ -165,7 +144,7 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 		return 0;
 
 #ifdef USE_RADIX_TREE
-	shadow_pages = &current->sbpf->page_fault.sbpf_mm->shadow_pages;
+	paddr_to_folio = &current->sbpf->page_fault.sbpf_mm->paddr_to_folio;
 #else
 	spages = current->sbpf->page_fault.sbpf_mm->shadow_pages;
 #endif
@@ -184,15 +163,26 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			entry = pte_mkspecial(entry);
 		} else {
 			if (paddr) {
-				touch_page_table_pte(mm, paddr, &ppte);
-				if (pte_present(*ppte)) {
-					entry = *ppte;
+				// This optimization slows down the overall performance. Disable temporary before delete.
+#ifdef USE_RADIX_TREE
+				slot = radix_tree_lookup_slot(paddr_to_folio, paddr);
+				folio = slot != NULL ?
+						rcu_dereference_protected(*slot, true) :
+						NULL;
+#else
+				ppte = (pte_t *)trie_search(spages, paddr);
+#endif
+				if (!IS_ERR_OR_NULL(folio) &&
+				    folio_ref_count(folio) > 0) {
+					entry = mk_pte(&folio->page, pgprot);
+					entry = pte_sw_mkyoung(entry);
+					entry = pte_mkwrite(entry);
 					goto set_pte;
 				}
 			}
 
-			new_folio = 1;
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			new_folio = 1;
 			if (unlikely(!folio))
 				return 0;
 			if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
@@ -203,45 +193,48 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			entry = pte_mkwrite(entry);
 
 			inc_mm_counter(mm, MM_ANONPAGES);
-
-			radix_tree_insert(
-				&current->sbpf->page_fault.sbpf_mm->shadow_pages, vaddr,
-				(void *)pte);
 		}
 
 set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
+		// Anonymous mapping.
+		if (paddr == 0) {
+			ret = radix_tree_insert(
+				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
+				(void *)vaddr);
+			paddr = vaddr;
+		} else {
+			ret = radix_tree_insert(
+				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
+				(void *)paddr);
+		}
+		if (unlikely(ret)) {
+			printk("Error in radix_tree_insert 0x%lx error %d\n", vaddr, ret);
+			return 0;
+		}
 		// We allocate new page, but original paddr is empty.
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
-		if (paddr && folio != NULL) {
+		if (paddr && folio != NULL && new_folio) {
 			// Caching the pte entry to the shadow page trie.
-			set_pte_at(mm, paddr, ppte, entry);
-			if (new_folio) {
 #ifdef USE_RADIX_TREE
-				if (radix_tree_insert(shadow_pages, paddr,
-						      (void *)ppte)) {
-					printk("Error in radix_tree_insert 0x%lx", paddr);
+			if (!slot) {
+				ret = radix_tree_insert(paddr_to_folio, paddr, folio);
+				if (unlikely(ret)) {
+					printk("Error in trie_insert 0x%lx error %d\n",
+					       paddr, ret);
 					return 0;
 				}
-#else
-				if (trie_insert(spages, paddr, (uint64_t)pte)) {
-					printk("Error in trie_insert 0x%lx", paddr);
-					return 0;
-				}
-#endif
-				folio->page.reverse_map =
-					kmalloc(sizeof(struct rb_root), GFP_KERNEL);
-				reverse_map = kmalloc(sizeof(struct sbpf_reverse_map),
-						      GFP_KERNEL);
-				reverse_map->vaddr = paddr;
-				rb_add(&reverse_map->node, folio->page.reverse_map,
-				       reverse_map_rb_less);
+			} else {
+				radix_tree_replace_slot(paddr_to_folio, slot, folio);
 			}
+#else
+			if (trie_insert(spages, paddr, (uint64_t)pte)) {
+				printk("Error in trie_insert 0x%lx", paddr);
+				return 0;
+			}
+#endif
 		}
-		reverse_map = kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
-		reverse_map->vaddr = vaddr;
-		rb_add(&reverse_map->node, folio->page.reverse_map, reverse_map_rb_less);
 		pte_unmap(pte);
 		// TODO!. We have to elaborate the boundary mechanism.
 		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
@@ -264,10 +257,13 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	pte_t *pte;
 	pte_t ptent;
 	struct page *page;
-	struct sbpf_reverse_map *rmap;
 
+	// unmap_region
 	tlb_gather_mmu(&tlb, mm);
 
+	// unmap_vmas
+	// unmap_single_vma
+	// unmap_page_range
 	address = address & PAGE_MASK;
 	pte = walk_page_table_pte(mm, address);
 	ptent = *pte;
@@ -279,20 +275,17 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			goto error;
 		ptep_get_and_clear(mm, address, pte);
 		tlb_remove_tlb_entry(&tlb, pte, address);
-		// Have to remove the reverse mapping from the folio->page->reverse_map.
-		rmap = search_reverse_map_rb(page->reverse_map, address);
-		rb_erase(&rmap->node, page->reverse_map);
-
-		if (RB_EMPTY_ROOT(page->reverse_map)) {
-			folio_put(page_folio(page));
-			kfree(rmap);
-		}
+		folio_put(page_folio(page));
 
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
 	pte_clear(mm, address, pte);
 	paddr = (unsigned long)radix_tree_delete(
-		&current->sbpf->page_fault.sbpf_mm->shadow_pages, address);
+		&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, address);
+	if (folio_ref_zero_or_close_to_overflow(page_folio(page)) && paddr != 0) {
+		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				  paddr);
+	}
 
 	tlb_finish_mmu(&tlb);
 

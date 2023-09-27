@@ -13,24 +13,12 @@ struct sbpf_mm_struct {
 	struct list_head elem;
 	atomic_t refcnt;
 #ifdef USE_RADIX_TREE
-	struct radix_tree_root shadow_pages;
+	struct radix_tree_root paddr_to_folio;
+	struct radix_tree_root vaddr_to_paddr;
 #else
 	struct trie_node *shadow_pages;
 #endif
 };
-
-struct sbpf_reverse_map {
-	struct rb_node node;
-	unsigned long vaddr;
-};
-
-inline static bool reverse_map_rb_less(struct rb_node *a, const struct rb_node *b)
-{
-	struct sbpf_reverse_map *ra = rb_entry(a, struct sbpf_reverse_map, node);
-	struct sbpf_reverse_map *rb = rb_entry(b, struct sbpf_reverse_map, node);
-
-	return ra->vaddr < rb->vaddr;
-}
 
 struct trie_node {
 	union {
