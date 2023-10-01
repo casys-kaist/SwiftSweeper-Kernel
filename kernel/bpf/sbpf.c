@@ -33,6 +33,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			   unsigned int flags)
 {
 	struct sbpf_vm_fault sbpf_fault;
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	unsigned long vaddr;
 	unsigned long paddr;
 	struct folio *orig_folio;
@@ -40,6 +41,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	void __rcu **slot;
 	pte_t *pte;
 	pte_t entry;
+#endif
 
 	sbpf_fault.vaddr = fault_addr;
 	sbpf_fault.flags = flags;
@@ -47,6 +49,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	sbpf_fault.aux = current->sbpf->page_fault.aux;
 
 	// Cow routine.
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	vaddr = fault_addr & PAGE_MASK;
 	paddr = sbpf_mem_lookup_paddr(&sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr);
 	if (paddr != 0) {
@@ -93,6 +96,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 
 		return 0;
 	}
+#endif
 
 	// Call page fault function.
 	return current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
@@ -396,8 +400,10 @@ int copy_sbpf(struct task_struct *tsk)
 	struct radix_tree_iter iter;
 	struct folio *folio;
 	void __rcu **slot;
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	pte_t *pte;
 	pte_t *cpte;
+#endif
 
 	if (current->sbpf == NULL) {
 		tsk->sbpf = NULL;
@@ -428,6 +434,7 @@ int copy_sbpf(struct task_struct *tsk)
 		}
 
 		/* Copy the pte from the parent process and make the parent pte as an write protected. */
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 		radix_tree_for_each_slot(
 			slot, &old_sbpf->page_fault.sbpf_mm->vaddr_to_paddr, &iter, 0) {
 			pte = walk_page_table_pte(current->mm, iter.index);
@@ -438,6 +445,7 @@ int copy_sbpf(struct task_struct *tsk)
 			radix_tree_insert(&tsk->sbpf->page_fault.sbpf_mm->vaddr_to_paddr,
 					  iter.index, *slot);
 		}
+#endif
 	}
 
 	if (current->sbpf->sbpf_func.prog != NULL) {

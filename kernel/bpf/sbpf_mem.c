@@ -276,12 +276,14 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 
 set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 		ret = sbpf_mem_insert_paddr(
 			&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr, paddr);
 		if (unlikely(!ret)) {
 			printk("Error in radix_tree_insert 0x%lx error %d\n", vaddr, ret);
 			return 0;
 		}
+#endif
 		// We allocate new page, but original paddr is empty.
 		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
 		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
@@ -352,6 +354,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		folio = page_folio(page);
 	}
 	pte_clear(mm, address, pte);
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	paddr = sbpf_mem_put_paddr(&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr,
 				   address);
 	if (paddr) {
@@ -361,6 +364,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 				  paddr);
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
+#endif
 
 	tlb_finish_mmu(&tlb);
 

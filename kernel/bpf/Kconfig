@@ -104,4 +104,9 @@ config BPF_SBPF
 	help
 	  Enables sBPF.
 
+config BPF_SBPF_DISABLE_REVERSE
+	bool "Disable reverse mapping"
+	help
+		Disable reverse mapping and transparent physical address management.
+
 endmenu # "BPF subsystem"
