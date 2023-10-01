@@ -113,11 +113,88 @@ pte_t *sbpf_set_write_protected_pte(struct task_struct *tsk, unsigned long vaddr
 		set_pte_at(tsk->mm, vaddr, pte, entry);
 		pte_unmap(pte);
 	} else {
-		printk("Invalid pte at the new task %d\n", tsk->pid);
+		printk("Invalid pte at the new task %d 0x%lx\n", tsk->pid, vaddr);
 		return NULL;
 	}
 
 	return pte;
+}
+
+int sbpf_mem_insert_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
+			  unsigned long paddr)
+{
+	int ret;
+
+	ret = radix_tree_insert(vtp, vaddr, (void *)(paddr + 1));
+	if (unlikely(ret)) {
+		printk("Error in radix_tree_insert v:0x%lx p:0x%lx error %d\n", vaddr,
+		       paddr, ret);
+		return 0;
+	}
+
+	return 1;
+}
+
+unsigned long sbpf_mem_lookup_paddr(struct radix_tree_root *vtp, unsigned long vaddr)
+{
+	void __rcu *slot;
+	unsigned long paddr;
+
+	slot = radix_tree_lookup_slot(vtp, vaddr);
+	if (!slot) {
+		return 0;
+	}
+	paddr = *(unsigned long *)slot;
+	if ((paddr & (PAGE_SIZE - 1)) >= 4096) {
+		printk("Overflow vaddr to paddr reference 0x%lx\n", paddr);
+		return 0;
+	}
+
+	return paddr & PAGE_MASK;
+}
+
+unsigned long sbpf_mem_get_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
+				 unsigned long _paddr)
+{
+	void __rcu *slot;
+	unsigned long paddr;
+
+	slot = radix_tree_lookup_slot(vtp, vaddr);
+	if (!slot) {
+		sbpf_mem_insert_paddr(vtp, vaddr, _paddr);
+		return _paddr;
+	}
+	paddr = *(unsigned long *)slot;
+	if ((paddr & (PAGE_SIZE - 1)) >= 4096) {
+		printk("Overflow vaddr to paddr reference 0x%lx\n", paddr);
+		return 0;
+	}
+	radix_tree_replace_slot(vtp, slot, (void *)(paddr + 1));
+
+	return paddr & PAGE_MASK;
+}
+
+unsigned long sbpf_mem_put_paddr(struct radix_tree_root *vtp, unsigned long vaddr)
+{
+	void __rcu *slot;
+	unsigned long paddr;
+
+	slot = radix_tree_lookup_slot(vtp, vaddr);
+	if (!slot) {
+		return 0;
+	}
+	paddr = *(unsigned long *)slot;
+	if ((paddr & (PAGE_SIZE - 1)) == 0) {
+		printk("Overflow vaddr to paddr reference 0x%lx\n", paddr);
+		return 0;
+	}
+	if ((paddr & (PAGE_SIZE - 1)) == 1) {
+		radix_tree_delete(vtp, vaddr);
+		return paddr & PAGE_MASK;
+	} else
+		radix_tree_replace_slot(vtp, slot, (void *)(paddr - 1));
+
+	return 0;
 }
 
 // If paddr is 0, kernel allocates the memory.
@@ -132,7 +209,6 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 #else
 	struct trie_node *spages;
 #endif
-
 	int ret;
 	int new_folio = 0;
 	pte_t *pte;
@@ -152,6 +228,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 	vaddr = vaddr & PAGE_MASK;
 	paddr = paddr & PAGE_MASK;
 	ret = touch_page_table_pte(mm, vaddr, &pte);
+
+	if (paddr == 0)
+		return -EINVAL;
 
 	if (likely(!ret)) {
 		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
@@ -197,18 +276,9 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 
 set_pte:
 		set_pte_at(mm, vaddr, pte, entry);
-		// Anonymous mapping.
-		if (paddr == 0) {
-			ret = radix_tree_insert(
-				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
-				(void *)vaddr);
-			paddr = vaddr;
-		} else {
-			ret = radix_tree_insert(
-				&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr,
-				(void *)paddr);
-		}
-		if (unlikely(ret)) {
+		ret = sbpf_mem_insert_paddr(
+			&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr, paddr);
+		if (unlikely(!ret)) {
 			printk("Error in radix_tree_insert 0x%lx error %d\n", vaddr, ret);
 			return 0;
 		}
@@ -240,6 +310,7 @@ set_pte:
 		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
 			current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
 		}
+
 		return 1;
 	} else {
 		// printk("COW Not implemented yet");
@@ -256,7 +327,8 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	unsigned long paddr;
 	pte_t *pte;
 	pte_t ptent;
-	struct page *page;
+	struct page *page = NULL;
+	struct folio *folio = NULL;
 
 	// unmap_region
 	tlb_gather_mmu(&tlb, mm);
@@ -266,6 +338,8 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	// unmap_page_range
 	address = address & PAGE_MASK;
 	pte = walk_page_table_pte(mm, address);
+	if (pte == NULL)
+		goto error;
 	ptent = *pte;
 	if (pte_none(ptent))
 		goto error;
@@ -275,16 +349,17 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 			goto error;
 		ptep_get_and_clear(mm, address, pte);
 		tlb_remove_tlb_entry(&tlb, pte, address);
-		folio_put(page_folio(page));
-
-		dec_mm_counter(current->mm, MM_ANONPAGES);
+		folio = page_folio(page);
 	}
 	pte_clear(mm, address, pte);
-	paddr = (unsigned long)radix_tree_delete(
-		&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr, address);
-	if (folio_ref_zero_or_close_to_overflow(page_folio(page)) && paddr != 0) {
+	paddr = sbpf_mem_put_paddr(&current->sbpf->page_fault.sbpf_mm->vaddr_to_paddr,
+				   address);
+	if (paddr) {
+		if (folio != NULL)
+			folio_put(folio);
 		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				  paddr);
+		dec_mm_counter(current->mm, MM_ANONPAGES);
 	}
 
 	tlb_finish_mmu(&tlb);

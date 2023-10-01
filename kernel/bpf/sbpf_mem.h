@@ -38,5 +38,11 @@ void **trie_search_node(struct trie_node *root, uint64_t caddr);
 int trie_free(struct trie_node *root);
 pte_t *sbpf_set_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
 				    pgprot_t pgprot, struct folio *folio);
+unsigned long sbpf_mem_get_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
+				 unsigned long paddr);
+unsigned long sbpf_mem_put_paddr(struct radix_tree_root *vtp, unsigned long vaddr);
+unsigned long sbpf_mem_lookup_paddr(struct radix_tree_root *vtp, unsigned long vaddr);
+int sbpf_mem_insert_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
+			  unsigned long paddr);
 
 #endif

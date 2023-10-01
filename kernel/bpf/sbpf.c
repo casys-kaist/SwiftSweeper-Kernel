@@ -48,9 +48,8 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 
 	// Cow routine.
 	vaddr = fault_addr & PAGE_MASK;
-	slot = radix_tree_lookup_slot(&sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr);
-	if (slot != NULL) {
-		paddr = (unsigned long)rcu_dereference_protected(*slot, true);
+	paddr = sbpf_mem_lookup_paddr(&sbpf->page_fault.sbpf_mm->vaddr_to_paddr, vaddr);
+	if (paddr != 0) {
 		slot = radix_tree_lookup_slot(&sbpf->page_fault.sbpf_mm->paddr_to_folio,
 					      paddr);
 		orig_folio = rcu_dereference_protected(*slot, true);
@@ -68,10 +67,13 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 				return -ENOMEM;
 
 			folio_copy(folio, orig_folio);
+
+			radix_tree_replace_slot(&sbpf->page_fault.sbpf_mm->paddr_to_folio,
+						slot, folio);
 			entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
-			folio_ref_dec(orig_folio);
+			folio_put(orig_folio);
 			inc_mm_counter(current->mm, MM_ANONPAGES);
 
 			set_pte(pte, entry);
@@ -405,6 +407,7 @@ int copy_sbpf(struct task_struct *tsk)
 	old_sbpf = current->sbpf;
 	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
 
+	/* Initialize the sbpf_mm struct. */
 	if (old_sbpf->page_fault.prog != NULL) {
 		init_sbpf_page_fault(tsk->sbpf, NULL, old_sbpf->page_fault.prog);
 		tsk->sbpf->page_fault.aux = old_sbpf->page_fault.aux;
@@ -415,21 +418,16 @@ int copy_sbpf(struct task_struct *tsk)
 			 &old_sbpf->page_fault.sbpf_mm->children);
 		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
 
-		/* Copy the pte from the parent process and make the parent pte as an write protected. */
+		/* Copy the folio from the parent process and increase the folio reference count. */
 		radix_tree_for_each_slot(
 			slot, &old_sbpf->page_fault.sbpf_mm->paddr_to_folio, &iter, 0) {
 			folio = rcu_dereference_protected(*slot, true);
-			folio_ref_inc(folio);
-			pte = walk_page_table_pte(current->mm, iter.index);
-			ptep_set_wrprotect(current->mm, iter.index, pte);
-			cpte = sbpf_set_write_protected_pte(tsk, iter.index,
-							    pte_pgprot(*pte), folio);
-			if (cpte != NULL)
-				radix_tree_insert(
-					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-					iter.index, folio);
+			folio_get(folio);
+			radix_tree_insert(&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+					  iter.index, folio);
 		}
 
+		/* Copy the pte from the parent process and make the parent pte as an write protected. */
 		radix_tree_for_each_slot(
 			slot, &old_sbpf->page_fault.sbpf_mm->vaddr_to_paddr, &iter, 0) {
 			pte = walk_page_table_pte(current->mm, iter.index);
@@ -453,8 +451,8 @@ int copy_sbpf(struct task_struct *tsk)
 
 	// We have to clean up user shared pages in case of fork.
 	// This is because the parent process (current) will has a different page
-	// from the original process. If we do not clean up, the parent process
-	// bpf functins will have a wrong page view from the user space view.
+	// from the original process. If we do not clean up, the parent process and
+	// bpf functions will have a wrong page view from the user space view.
 	radix_tree_for_each_slot(slot, &current->sbpf->user_shared_pages, &iter, 0) {
 		radix_tree_iter_delete(&current->sbpf->user_shared_pages, &iter, slot);
 	}
