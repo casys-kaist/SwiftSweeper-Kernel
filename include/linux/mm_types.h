@@ -198,6 +198,10 @@ struct page {
 	unsigned long memcg_data;
 #endif
 
+#ifdef CONFIG_BPF_SBPF
+	struct sbpf_reverse_map *sbpf_reverse;
+#endif
+
 	/*
 	 * On machines where all RAM is mapped into kernel address space,
 	 * we can simply calculate the virtual address. On machines with

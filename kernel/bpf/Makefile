@@ -41,7 +41,7 @@ obj-$(CONFIG_BPF_SYSCALL) += cpumask.o
 obj-${CONFIG_BPF_LSM} += bpf_lsm.o
 endif
 ifeq ($(CONFIG_BPF_SBPF),y)
-obj-$(CONFIG_BPF_SBPF) += sbpf.o sbpf_mem.o sbpf_trie.o
+obj-$(CONFIG_BPF_SBPF) += sbpf.o sbpf_mem.o sbpf_trie.o sbpf_reverse.o
 endif
 obj-$(CONFIG_BPF_PRELOAD) += preload/
 
