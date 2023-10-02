@@ -34,8 +34,10 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 {
 	struct sbpf_vm_fault sbpf_fault;
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+	struct sbpf_reverse_map_elem *cur;
 	unsigned long vaddr;
 	unsigned long paddr;
+	unsigned long addr;
 	struct folio *orig_folio;
 	struct folio *folio;
 	void __rcu **slot;
@@ -52,6 +54,8 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	vaddr = fault_addr & PAGE_MASK;
 	pte = walk_page_table_pte(current->mm, vaddr);
+	if (pte == NULL)
+		goto out;
 	orig_folio = page_folio(pte_page(*pte));
 	if (orig_folio->page.sbpf_reverse == NULL)
 		goto out;
@@ -60,7 +64,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 		slot = radix_tree_lookup_slot(&sbpf->page_fault.sbpf_mm->paddr_to_folio,
 					      paddr);
 		// When the page is shared, we have to copy the page.
-		if (pte != NULL && folio_ref_count(orig_folio) > 1) {
+		if (folio_ref_count(orig_folio) > 1) {
 			// We have to make the parent page as a read only.
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 			if (unlikely(!folio))
@@ -69,6 +73,8 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 				return -ENOMEM;
 
 			folio_copy(folio, orig_folio);
+			folio->page.sbpf_reverse =
+				sbpf_reverse_dup(orig_folio->page.sbpf_reverse);
 
 			radix_tree_replace_slot(&sbpf->page_fault.sbpf_mm->paddr_to_folio,
 						slot, folio);
@@ -77,21 +83,26 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			entry = pte_mkwrite(entry);
 			folio_put(orig_folio);
 			inc_mm_counter(current->mm, MM_ANONPAGES);
-
-			set_pte(pte, entry);
-		} else if (pte != NULL && folio_ref_count(orig_folio) == 1) {
+		} else if (folio_ref_count(orig_folio) == 1) {
 			// Reuse the original folio, becuase it is not shared among process.
-			pte = walk_page_table_pte(current->mm, vaddr);
-			entry = mk_pte(&orig_folio->page, PAGE_SHARED_EXEC);
+			folio = orig_folio;
+			entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
 			inc_mm_counter(current->mm, MM_ANONPAGES);
-
-			set_pte(pte, entry);
 		} else {
 			printk("Error in folio ref cnt:%d addr:0x%lx, paddr:0x%lx",
 			       folio_ref_count(orig_folio), vaddr, paddr);
 			return -EINVAL;
+		}
+
+		list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+			for (addr = cur->start; addr < cur->end; addr += PAGE_SIZE) {
+				pte = walk_page_table_pte(current->mm, addr);
+				if (pte != NULL) {
+					set_pte(pte, entry);
+				}
+			}
 		}
 
 		return 0;
@@ -393,6 +404,8 @@ int copy_sbpf(struct task_struct *tsk)
 	struct folio *folio;
 	void __rcu **slot;
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+	struct sbpf_reverse_map_elem *cur;
+	unsigned long addr;
 	pte_t *pte;
 	pte_t *cpte;
 #endif
@@ -425,11 +438,15 @@ int copy_sbpf(struct task_struct *tsk)
 					  iter.index, folio);
 			/* Copy the pte from the parent process and make the parent pte as an write protected. */
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-			ptep_set_wrprotect(current->mm, iter.index, pte);
-			cpte = sbpf_set_write_protected_pte(tsk, iter.index,
-							    pte_pgprot(*pte),
-							    page_folio(pte_page(*pte)));
-
+			list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+				for (addr = cur->start; addr < cur->end;
+				     addr += PAGE_SIZE) {
+					pte = walk_page_table_pte(current->mm, addr);
+					ptep_set_wrprotect(current->mm, addr, pte);
+					cpte = sbpf_set_write_protected_pte(
+						tsk, addr, pte_pgprot(*pte), folio);
+				}
+			}
 #endif
 		}
 	}

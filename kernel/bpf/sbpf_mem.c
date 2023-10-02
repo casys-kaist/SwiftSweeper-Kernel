@@ -249,7 +249,8 @@ static int bpf_map_pte(unsigned long vaddr, unsigned long paddr, unsigned long v
 			}
 
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
-			folio->page.sbpf_reverse = sbpf_reverse_init(vaddr, paddr);
+			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
+			sbpf_reverse_insert(folio->page.sbpf_reverse, vaddr);
 			new_folio = 1;
 			if (unlikely(!folio))
 				return 0;
@@ -268,7 +269,7 @@ set_pte:
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 		if (!new_folio) {
 			ret = sbpf_reverse_insert(folio->page.sbpf_reverse, vaddr);
-			if (unlikely(!ret)) {
+			if (unlikely(ret)) {
 				printk("Error in radix_tree_insert 0x%lx error %d\n",
 				       vaddr, ret);
 				return 0;
@@ -334,19 +335,26 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		if (!page)
 			goto error;
 		ptep_get_and_clear(mm, address, pte);
-		// tlb_remove_tlb_entry(&tlb, pte, address);
+		tlb_remove_tlb_entry(&tlb, pte, address);
 		folio = page_folio(page);
 	}
 	pte_clear(mm, address, pte);
 	sbpf_reverse_remove(folio->page.sbpf_reverse, address);
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
-		paddr = folio->page.sbpf_reverse->paddr;
-		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				  paddr);
-		folio_put(folio);
-		dec_mm_counter(current->mm, MM_ANONPAGES);
-	}
+	// Fix me: Temporary enable this simple implementation.
+	paddr = folio->page.sbpf_reverse->paddr;
+	radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio, paddr);
+	sbpf_reverse_delete(folio->page.sbpf_reverse);
+	folio_put(folio);
+	dec_mm_counter(current->mm, MM_ANONPAGES);
+	// if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
+	// 	paddr = folio->page.sbpf_reverse->paddr;
+	// 	radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+	// 			  paddr);
+	// 	kfree(folio->page.sbpf_reverse);
+	// 	folio_put(folio);
+	// 	dec_mm_counter(current->mm, MM_ANONPAGES);
+	// }
 #endif
 
 	tlb_finish_mmu(&tlb);
