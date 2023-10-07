@@ -96,11 +96,15 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			return -EINVAL;
 		}
 
+		// printk("paddr 0x%lx\n", fault_addr);
+		// sbpf_reverse_dump(folio->page.sbpf_reverse);
 		list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
 			for (addr = cur->start; addr < cur->end; addr += PAGE_SIZE) {
 				pte = walk_page_table_pte(current->mm, addr);
 				if (pte != NULL) {
 					set_pte(pte, entry);
+				} else {
+					printk("Error in set pte addr:0x%lx\n", addr);
 				}
 			}
 		}
@@ -353,11 +357,14 @@ static void release_sbpf_mm_struct(struct task_struct *tsk,
 	radix_tree_for_each_slot(slot, &sbpf_mm->paddr_to_folio, &iter, 0) {
 		folio = rcu_dereference_protected(*slot, true);
 		if (folio_ref_count(folio) > 0) {
+			atomic_set(&folio->_mapcount, -1);
 			folio_put(folio);
 			dec_mm_counter(tsk->mm, MM_ANONPAGES);
 		}
 		radix_tree_iter_delete(&sbpf_mm->paddr_to_folio, &iter, slot);
 	}
+
+	kfree(sbpf_mm);
 }
 
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
@@ -388,7 +395,6 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 		if (sbpf->page_fault.prog) {
 			release_sbpf_mm_struct(tsk, sbpf->page_fault.sbpf_mm);
 			bpf_prog_put(sbpf->page_fault.prog);
-			kfree(sbpf->page_fault.sbpf_mm);
 		}
 
 		kfree(sbpf);
@@ -397,7 +403,7 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 
 // Copy sbpf from current to tsk.
 // This function is used for clone.
-int copy_sbpf(struct task_struct *tsk)
+int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct sbpf_task *old_sbpf;
 	struct radix_tree_iter iter;
@@ -422,32 +428,47 @@ int copy_sbpf(struct task_struct *tsk)
 	if (old_sbpf->page_fault.prog != NULL) {
 		init_sbpf_page_fault(tsk->sbpf, NULL, old_sbpf->page_fault.prog);
 		tsk->sbpf->page_fault.aux = old_sbpf->page_fault.aux;
-		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
-		tsk->sbpf->page_fault.prog = old_sbpf->page_fault.prog;
+		bpf_prog_inc(old_sbpf->page_fault.prog);
+		if (clone_flags & CLONE_VM) {
+			tsk->sbpf->page_fault.sbpf_mm = old_sbpf->page_fault.sbpf_mm;
+			atomic_inc(&tsk->sbpf->page_fault.sbpf_mm->refcnt);
+		} else {
+			tsk->sbpf->page_fault.sbpf_mm->parent =
+				old_sbpf->page_fault.sbpf_mm;
+			tsk->sbpf->page_fault.prog = old_sbpf->page_fault.prog;
 
-		list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
-			 &old_sbpf->page_fault.sbpf_mm->children);
-		tsk->sbpf->page_fault.sbpf_mm->parent = old_sbpf->page_fault.sbpf_mm;
+			list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
+				 &old_sbpf->page_fault.sbpf_mm->children);
+			tsk->sbpf->page_fault.sbpf_mm->parent =
+				old_sbpf->page_fault.sbpf_mm;
 
-		/* Copy the folio from the parent process and increase the folio reference count. */
-		radix_tree_for_each_slot(
-			slot, &old_sbpf->page_fault.sbpf_mm->paddr_to_folio, &iter, 0) {
-			folio = rcu_dereference_protected(*slot, true);
-			folio_get(folio);
-			radix_tree_insert(&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-					  iter.index, folio);
-			/* Copy the pte from the parent process and make the parent pte as an write protected. */
+			/* Copy the folio from the parent process and increase the folio reference count. */
+			radix_tree_for_each_slot(
+				slot, &old_sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				&iter, 0) {
+				folio = rcu_dereference_protected(*slot, true);
+				folio_get(folio);
+				radix_tree_insert(
+					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+					iter.index, folio);
+				/* Copy the pte from the parent process and make the parent pte as an write protected. */
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-			list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
-				for (addr = cur->start; addr < cur->end;
-				     addr += PAGE_SIZE) {
-					pte = walk_page_table_pte(current->mm, addr);
-					ptep_set_wrprotect(current->mm, addr, pte);
-					cpte = sbpf_set_write_protected_pte(
-						tsk, addr, pte_pgprot(*pte), folio);
+				sbpf_reverse_dump(folio->page.sbpf_reverse);
+				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
+						    list) {
+					for (addr = cur->start; addr < cur->end;
+					     addr += PAGE_SIZE) {
+						pte = walk_page_table_pte(current->mm,
+									  addr);
+						ptep_set_wrprotect(current->mm, addr,
+								   pte);
+						cpte = sbpf_touch_write_protected_pte(
+							tsk, addr, pte_pgprot(*pte),
+							folio);
+					}
 				}
-			}
 #endif
+			}
 		}
 	}
 

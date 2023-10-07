@@ -52,7 +52,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			   unsigned int flags);
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len);
 
-int copy_sbpf(struct task_struct *tsk);
+int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk);
 void exit_sbpf(struct task_struct *tsk);
 
 #endif

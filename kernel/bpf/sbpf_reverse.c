@@ -154,6 +154,7 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 	if (map == NULL)
 		return;
 
+	printk(KERN_INFO "dump reverse map:\n");
 	list_for_each_entry(cur, &map->elem, list) {
 		printk(KERN_INFO "\tstart: %lx, end: %lx\n", cur->start, cur->end);
 	}

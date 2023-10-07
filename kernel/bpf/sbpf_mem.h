@@ -53,7 +53,7 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src);
 void sbpf_reverse_dump(struct sbpf_reverse_map *map);
 
 /* APIs for page table management */
-pte_t *sbpf_set_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
+pte_t *sbpf_touch_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
 				    pgprot_t pgprot, struct folio *folio);
 inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address);
 

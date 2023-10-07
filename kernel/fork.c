@@ -2521,7 +2521,7 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
-	retval = copy_sbpf(p);
+	retval = copy_sbpf(clone_flags, p);
 	if (retval)
 		goto bad_fork_sbpf;
 
