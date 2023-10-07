@@ -346,25 +346,24 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 	sbpf_reverse_remove(folio->page.sbpf_reverse, address);
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 
-	list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
-		for (addr = cur->start; addr < cur->end; addr += PAGE_SIZE) {
-			pte = walk_page_table_pte(current->mm, addr);
-			if (pte == NULL)
-				goto error;
-			ptent = *pte;
-			if (pte_none(ptent))
-				goto error;
-			if (pte_present(ptent)) {
-				page = pte_page(ptent);
-				if (!page)
-					goto error;
-				ptep_get_and_clear(mm, address, pte);
-				tlb_remove_tlb_entry(&tlb, pte, address);
-			}
-		}
-	}
+	// list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+	// 	for (addr = cur->start; addr < cur->end; addr += PAGE_SIZE) {
+	// 		pte = walk_page_table_pte(current->mm, addr);
+	// 		if (pte == NULL)
+	// 			goto error;
+	// 		ptent = *pte;
+	// 		if (pte_none(ptent))
+	// 			goto error;
+	// 		if (pte_present(ptent)) {
+	// 			page = pte_page(ptent);
+	// 			if (!page)
+	// 				goto error;
+	// 			ptep_get_and_clear(mm, address, pte);
+	// 			tlb_remove_tlb_entry(&tlb, pte, address);
+	// 		}
+	// 	}
+	// }
 	// sbpf_reverse_delete(folio->page.sbpf_reverse);
-	// atomic_set(&folio->_mapcount, -1);
 	// folio_put(folio);
 	// dec_mm_counter(current->mm, MM_ANONPAGES);
 	// printk("paddr 0x%lx\n", address);
@@ -376,6 +375,7 @@ static int bpf_unmap_pte(unsigned long address, unsigned long vm_flags,
 		paddr = folio->page.sbpf_reverse->paddr;
 		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				  paddr);
+		atomic_set(&folio->_mapcount, -1);
 		kfree(folio->page.sbpf_reverse);
 		folio_put(folio);
 		dec_mm_counter(current->mm, MM_ANONPAGES);

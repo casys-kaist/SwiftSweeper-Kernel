@@ -453,7 +453,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					iter.index, folio);
 				/* Copy the pte from the parent process and make the parent pte as an write protected. */
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-				sbpf_reverse_dump(folio->page.sbpf_reverse);
 				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
 						    list) {
 					for (addr = cur->start; addr < cur->end;
