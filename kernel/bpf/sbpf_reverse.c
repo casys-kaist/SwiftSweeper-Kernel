@@ -135,13 +135,17 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
 {
 	struct sbpf_reverse_map *dst = NULL;
 	struct sbpf_reverse_map_elem *cur = NULL;
+	struct sbpf_reverse_map_elem *new = NULL;
 
 	if (src == NULL)
 		return NULL;
 
 	dst = sbpf_reverse_init(src->paddr);
 	list_for_each_entry(cur, &src->elem, list) {
-		sbpf_reverse_insert(dst, cur->start);
+		new = kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
+		new->start = cur->start;
+		new->end = cur->end;
+		list_add_tail(&new->list, &dst->elem);
 	}
 
 	return dst;
