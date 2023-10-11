@@ -5599,13 +5599,26 @@ union bpf_attr {
  *
  *		**NULL** if the uaddr is invalid.
  *
- * void *bpf_set_page_table(void *uaddr, void *paddr, u64 vmf_flags, u64 prot, u64 vm_flags)
+ * void *bpf_set_page_table(void *uaddr, size_t len, void *paddr, u64 vmf_flags, u64 prot)
  *	Description
  *		Make entry at the faulted process page table.
  *	Return
  *		Mapped kernel address on success.
  *
  *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_unset_page_table(void *uaddr, size_t len)
+ *	Description
+ *		Remove entry at the faulted process page table.
+ *	Return
+ *		**0** if the uaddr is valid.
+ *
+ * void *bpf_touch_page_table(void *uaddr, size_t len, void *paddr, u64 vmf_flags, u64 prot)
+ *	Description
+ *		Touch entry at the faulted process page table.
+ *	Return
+ *		**0** if the uaddr is valid.
+ *		**1** if the uaddr is invalid.
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -5823,6 +5836,8 @@ union bpf_attr {
 	FN(uaddr_to_kaddr, 212, ##ctx) \
 	FN(get_shared_page, 213, ##ctx) \
 	FN(set_page_table, 214, ##ctx) \
+	FN(unset_page_table, 215, ##ctx) \
+	FN(touch_page_table, 216, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't

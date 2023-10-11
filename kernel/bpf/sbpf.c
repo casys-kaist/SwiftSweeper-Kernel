@@ -38,12 +38,11 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	pte_t *pte;
 
 	pte = walk_page_table_pte(current->mm, vaddr);
+
 	if (pte == NULL)
 		goto sbpf_func;
 
 	orig_folio = page_folio(pte_page(*pte));
-	if (orig_folio->page.sbpf_reverse == NULL)
-		goto sbpf_func;
 
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	// Copy-on-write routine.
@@ -197,6 +196,10 @@ static const struct bpf_func_proto *bpf_sbpf_func_proto(enum bpf_func_id func_id
 		return &bpf_get_shared_page_proto;
 	case BPF_FUNC_set_page_table:
 		return &bpf_set_page_table_proto;
+	case BPF_FUNC_unset_page_table:
+		return &bpf_unset_page_table_proto;
+	case BPF_FUNC_touch_page_table:
+		return &bpf_touch_page_table_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}

@@ -34,6 +34,8 @@ struct trie_node {
 };
 
 extern const struct bpf_func_proto bpf_set_page_table_proto;
+extern const struct bpf_func_proto bpf_unset_page_table_proto;
+extern const struct bpf_func_proto bpf_touch_page_table_proto;
 
 /* APIs for Trie */
 void trie_init(struct trie_node **node);
@@ -56,6 +58,7 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map);
 pte_t *sbpf_touch_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
 				      pgprot_t pgprot, struct folio *folio);
 inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address);
+inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr, pte_t **pte);
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio,
 				     void __rcu **slot, int update_mappings);
 
