@@ -54,8 +54,10 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map);
 
 /* APIs for page table management */
 pte_t *sbpf_touch_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
-				    pgprot_t pgprot, struct folio *folio);
+				      pgprot_t pgprot, struct folio *folio);
 inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address);
+struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio,
+				     void __rcu **slot, int update_mappings);
 
 /* APIs for managing reference counted vaddr to paddr radix tree */
 unsigned long sbpf_mem_get_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
