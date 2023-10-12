@@ -67,6 +67,25 @@ int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr)
 	return 0;
 }
 
+int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
+			      unsigned long end)
+{
+	int ret = 0;
+	unsigned long addr = start;
+
+	if (map == NULL)
+		return -EINVAL;
+
+	while (addr < end) {
+		ret = sbpf_reverse_insert(map, addr);
+		if (ret)
+			return ret;
+		addr += PAGE_SIZE;
+	}
+
+	return 0;
+}
+
 int __sbpf_reverse_remove(struct sbpf_reverse_map_elem *map_elem, unsigned long addr)
 {
 	struct sbpf_reverse_map_elem *new_elem;

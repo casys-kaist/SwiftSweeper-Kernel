@@ -29,30 +29,34 @@ err:
 	return ret;
 }
 
+static int __handle_page_fault(pte_t *pte, unsigned long addr, void *aux)
+{
+	struct folio *orig_folio = page_folio(pte_page(*pte));
+	struct sbpf_task *sbpf = aux;
+
+	if (!IS_ERR_OR_NULL(sbpf_mem_copy_on_write(sbpf, orig_folio, NULL, true))) {
+		inc_mm_counter(current->mm, MM_ANONPAGES);
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
 int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			   unsigned int flags)
 {
 	unsigned long vaddr = fault_addr & PAGE_MASK;
 	struct sbpf_vm_fault sbpf_fault;
-	struct folio *orig_folio;
-	pte_t *pte;
-
-	pte = walk_page_table_pte(current->mm, vaddr);
-
-	if (pte == NULL)
-		goto sbpf_func;
-
-	orig_folio = page_folio(pte_page(*pte));
+	int ret;
 
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	// Copy-on-write routine.
-	if (!IS_ERR_OR_NULL(sbpf_mem_copy_on_write(sbpf, orig_folio, NULL, true))) {
-		inc_mm_counter(current->mm, MM_ANONPAGES);
+	ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
+					__handle_page_fault, sbpf);
+
+	if (!ret)
 		return 0;
-	}
 #endif
 
-sbpf_func:
 	sbpf_fault.vaddr = fault_addr;
 	sbpf_fault.flags = flags;
 	sbpf_fault.len = PAGE_SIZE;
@@ -351,6 +355,20 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 	}
 }
 
+static int __set_write_protected_current(pte_t *pte, unsigned long addr, void *aux)
+{
+	ptep_set_wrprotect(current->mm, addr, pte);
+	*(pgprot_t *)aux = pte_pgprot(*pte);
+	return 0;
+}
+
+static int __set_write_protected_new_task(pte_t *pte, unsigned long addr, void *aux)
+{
+	pte_t entry = *(pte_t *)aux;
+	set_pte(pte, entry);
+	return 0;
+}
+
 // Copy sbpf from current to tsk.
 // This function is used for clone.
 int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
@@ -362,8 +380,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	struct sbpf_reverse_map_elem *cur;
 	unsigned long addr;
-	pte_t *pte;
-	pte_t *cpte;
+	int ret;
+	pgprot_t pgprot;
+	pte_t entry;
 #endif
 
 	if (current->sbpf == NULL) {
@@ -408,24 +427,24 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
 						    list) {
-					for (addr = cur->start; addr < cur->end;
-					     addr += PAGE_SIZE) {
-						pte = walk_page_table_pte(current->mm,
-									  addr);
-						if (pte == NULL) {
-							trace_printk(
-								"PID %d CHILD %d Error in walk page table addr:0x%lx\n",
-								current->pid, tsk->pid,
-								addr);
-							sbpf_reverse_dump(
-								folio->page.sbpf_reverse);
-							return -EINVAL;
-						}
-						ptep_set_wrprotect(current->mm, addr,
-								   pte);
-						cpte = sbpf_touch_write_protected_pte(
-							tsk, addr, pte_pgprot(*pte),
-							folio);
+					ret = walk_page_table_pte_range(
+						current->mm, cur->start, cur->end,
+						__set_write_protected_current, &pgprot);
+
+					entry = mk_pte(&folio->page, pgprot);
+					entry = pte_sw_mkyoung(entry);
+					entry = pte_mkdirty(entry);
+					ret |= touch_page_table_pte_range(
+						tsk->mm, cur->start, cur->end,
+						__set_write_protected_new_task, &entry);
+
+					if (unlikely(ret)) {
+						trace_printk(
+							"PID %d CHILD %d Error in walk page table addr:0x%lx\n",
+							current->pid, tsk->pid, addr);
+						sbpf_reverse_dump(
+							folio->page.sbpf_reverse);
+						return -EINVAL;
 					}
 				}
 #endif

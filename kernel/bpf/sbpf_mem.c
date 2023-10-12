@@ -14,111 +14,169 @@
 #include <linux/mman.h>
 #include <linux/errno.h>
 #include <linux/list.h>
-#include <asm/page_types.h>
-#include <asm/pgtable.h>
-#include <asm/pgtable_types.h>
+#include <linux/pgtable.h>
 #include <asm/tlb.h>
 
 #include "sbpf_mem.h"
 
-inline pte_t *walk_page_table_pte(struct mm_struct *mm, unsigned long address)
+int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
+			      unsigned long end, pte_func func, void *aux)
 {
+	int ret;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pmd_t *pmd;
 	pud_t *pud;
 	pte_t *pte;
+	unsigned long next_pgd;
+	unsigned long next_p4d;
+	unsigned long next_pud;
+	unsigned long next_pmd;
+	unsigned long addr = start & PAGE_MASK;
 
-	pgd = pgd_offset(mm, address);
-	if (pgd_none_or_clear_bad(pgd))
-		return NULL;
-	// zap_p4d_range
-	p4d = p4d_offset(pgd, address);
-	if (p4d_none_or_clear_bad(p4d))
-		return NULL;
-	// zap_pud_range
-	pud = pud_offset(p4d, address);
-	if (pud_none_or_clear_bad(pud))
-		return NULL;
-	// zap_pmd_range
-	pmd = pmd_offset(pud, address);
-	if (pmd_none_or_trans_huge_or_clear_bad(pmd))
-		return NULL;
-	// zap_pte_range
-	pte = pte_offset_map(pmd, address);
-
-	return pte;
-}
-
-inline int touch_page_table_pte(struct mm_struct *mm, unsigned long vaddr, pte_t **pte)
-{
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pud_t *pud;
-	pmd_t *pmd;
-	pte_t orig_pte;
-
-	vaddr = vaddr & PAGE_MASK;
-	pgd = pgd_offset(mm, vaddr);
-	p4d = p4d_alloc(mm, pgd, vaddr);
-	if (!p4d)
+	if (start >= end || !mm || !func)
 		return -EINVAL;
 
-	pud = pud_alloc(mm, p4d, vaddr);
-	if (!pud)
-		return -EINVAL;
+	pgd = pgd_offset(mm, addr);
+	do {
+		next_pgd = pgd_addr_end(addr, end);
+		if (pgd_none_or_clear_bad(pgd))
+			return -ENOENT;
 
-	pmd = pmd_alloc(mm, pud, vaddr);
-	if (!pmd)
-		return -EINVAL;
+		p4d = p4d_offset(pgd, addr);
+		do {
+			next_p4d = p4d_addr_end(addr, end);
+			if (p4d_none_or_clear_bad(p4d))
+				return -ENOENT;
 
-	if (unlikely(pmd_none(*pmd))) {
-		*pte = NULL;
-	} else {
-		*pte = pte_offset_map(pmd, vaddr);
-		orig_pte = **pte;
+			pud = pud_offset(p4d, addr);
+			do {
+				next_pud = pud_addr_end(addr, end);
+				if (pud_none_or_clear_bad(pud))
+					return -ENOENT;
 
-		barrier();
-		if (pte_none(orig_pte)) {
-			pte_unmap(*pte);
-			*pte = NULL;
-		}
-	}
+				pmd = pmd_offset(pud, addr);
+				do {
+					next_pmd = pmd_addr_end(addr, end);
+					if (pmd_none_or_clear_bad(pmd))
+						return -ENOENT;
 
-	if (!*pte) {
-		if (pte_alloc(mm, pmd))
-			return -EINVAL;
-	} else {
-		*pte = pte_offset_map(pmd, vaddr);
-		return -EEXIST;
-	}
+					pte = pte_offset_map(pmd, addr);
+					do {
+						if (pte_none(*pte))
+							return -ENOENT;
+						ret = func(pte, addr, aux);
+						if (unlikely(ret))
+							return ret;
+					} while (pte++, addr += PAGE_SIZE,
+						 addr != next_pmd);
+				} while (pmd++, addr = next_pmd, addr != next_pud);
+			} while (pud++, addr = next_pud, addr != next_p4d);
+		} while (p4d++, addr = next_pgd, addr != next_pgd);
+	} while (pgd++, addr = next_pgd, addr != end);
 
-	*pte = pte_offset_map(pmd, vaddr);
 	return 0;
 }
 
-pte_t *sbpf_touch_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
-				      pgprot_t pgprot, struct folio *folio)
+int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
+			       unsigned long end, pte_func func, void *aux)
 {
 	int ret;
+	pgd_t *pgd;
+	p4d_t *p4d;
+	pmd_t *pmd;
+	pud_t *pud;
 	pte_t *pte;
+	pte_t orig_pte;
+	unsigned long next_pgd;
+	unsigned long next_p4d;
+	unsigned long next_pud;
+	unsigned long next_pmd;
+
+	unsigned long addr = start & PAGE_MASK;
+
+	if (start >= end || !mm || !func)
+		return -EINVAL;
+
+	pgd = pgd_offset(mm, addr);
+	do {
+		next_pgd = pgd_addr_end(addr, end);
+
+		p4d = p4d_alloc(mm, pgd, addr);
+		if (unlikely(!p4d))
+			return -ENOMEM;
+		do {
+			next_p4d = p4d_addr_end(addr, next_pgd);
+			pud = pud_alloc(mm, p4d, addr);
+			if (unlikely(!pud))
+				return -ENOMEM;
+			do {
+				next_pud = pud_addr_end(addr, next_p4d);
+				pmd = pmd_alloc(mm, pud, addr);
+				if (unlikely(!pmd))
+					return -ENOMEM;
+				do {
+					next_pmd = pmd_addr_end(addr, next_pud);
+					if (unlikely(pmd_none(*pmd)))
+						pte = NULL;
+					else {
+						pte = pte_offset_map(pmd, addr);
+						orig_pte = *pte;
+						barrier();
+						if (pte_none(orig_pte)) {
+							pte_unmap(*pte);
+							pte = NULL;
+						}
+					}
+
+					if (!pte && pte_alloc(mm, pmd))
+						return -ENOMEM;
+					else
+						pte = pte_offset_map(pmd, addr);
+
+					do {
+						ret = func(pte, addr, aux);
+						if (unlikely(ret))
+							return ret;
+					} while (pte++, addr += PAGE_SIZE,
+						 addr != next_pmd);
+				} while (pmd++, addr = next_pmd, addr != next_pud);
+			} while (pud++, addr = next_pud, addr != next_p4d);
+		} while (p4d++, addr = next_pgd, addr != next_pgd);
+	} while (pgd++, addr = next_pgd, addr != end);
+
+	return 0;
+}
+
+int __sbpf_touch_write_protected_pte(pte_t *pte, unsigned long addr, void *aux)
+{
 	pte_t entry;
+	pgprot_t pgprot;
 
-	ret = touch_page_table_pte(tsk->mm, vaddr, &pte);
+	pgprot.pgprot = *(unsigned long *)aux;
+	entry = mk_pte(pte_page(*pte), pgprot);
+	entry = pte_sw_mkyoung(entry);
+	entry = pte_wrprotect(entry);
+	set_pte(pte, entry);
 
-	if (likely(!ret)) {
-		entry = mk_pte(&folio->page, pgprot);
-		entry = pte_sw_mkyoung(entry);
-		entry = pte_wrprotect(entry);
-		set_pte_at(tsk->mm, vaddr, pte, entry);
-		pte_unmap(pte);
-	} else {
+	return 0;
+}
+
+int sbpf_touch_write_protected_pte(struct task_struct *tsk, unsigned long vaddr,
+				   pgprot_t pgprot, struct folio *folio)
+{
+	int ret;
+
+	ret = touch_page_table_pte_range(tsk->mm, vaddr, vaddr + PAGE_SIZE,
+					 __sbpf_touch_write_protected_pte, &pgprot);
+
+	if (unlikely(!ret)) {
 		printk("Invalid pte at the new task %d ret: %d 0x%lx\n", tsk->pid, ret,
 		       vaddr);
-		return NULL;
+		return -EINVAL;
 	}
 
-	return pte;
+	return 0;
 }
 
 int sbpf_mem_insert_paddr(struct radix_tree_root *vtp, unsigned long vaddr,
@@ -198,14 +256,20 @@ unsigned long sbpf_mem_put_paddr(struct radix_tree_root *vtp, unsigned long vadd
 	return 0;
 }
 
+static int __set_pte(pte_t *pte, unsigned long addr, void *aux)
+{
+	pte_t entry = *(pte_t *)aux;
+	set_pte_at(current->mm, addr, pte, entry);
+	return 0;
+}
+
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio,
 				     void __rcu **slot, int update_mappings)
 {
 	struct sbpf_reverse_map_elem *cur;
 	unsigned long paddr;
-	unsigned long addr;
 	struct folio *folio;
-	pte_t *pte;
+	int ret;
 	pte_t entry;
 
 	if (unlikely(orig_folio == NULL || orig_folio->page.sbpf_reverse == NULL))
@@ -250,17 +314,13 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		return ERR_PTR(-EINVAL);
 	}
 
-	// printk("paddr 0x%lx\n", fault_addr);
-	// sbpf_reverse_dump(folio->page.sbpf_reverse);
 	if (update_mappings) {
 		list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
-			for (addr = cur->start; addr < cur->end; addr += PAGE_SIZE) {
-				pte = walk_page_table_pte(current->mm, addr);
-				if (pte != NULL) {
-					set_pte(pte, entry);
-				} else {
-					printk("Error in set pte addr:0x%lx\n", addr);
-				}
+			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
+							__set_pte, &entry);
+			if (unlikely(ret)) {
+				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
+				       ret, cur->start, cur->end);
 			}
 		}
 	}
@@ -291,134 +351,113 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 
 	vaddr = vaddr & PAGE_MASK;
 	paddr = paddr & PAGE_MASK;
-	ret = touch_page_table_pte(mm, vaddr, &pte);
 
 	if (paddr == 0)
 		return -EINVAL;
 
-	if (likely(!ret)) {
-		// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
-		// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
-		// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
-		if (paddr) {
-			// This optimization slows down the overall performance. Disable temporary before delete.
-			slot = radix_tree_lookup_slot(paddr_to_folio, paddr);
-			orig_folio = slot != NULL ?
-					     rcu_dereference_protected(*slot, true) :
-					     NULL;
-			if (orig_folio != NULL && folio_ref_count(orig_folio)) {
-				folio = sbpf_mem_copy_on_write(current->sbpf, orig_folio,
-							       slot, true);
-			} else {
-				folio = orig_folio;
-			}
-			if (!IS_ERR_OR_NULL(folio)) {
-				entry = mk_pte(&folio->page, pgprot);
-				entry = pte_sw_mkyoung(entry);
-				entry = pte_mkwrite(entry);
-				goto set_pte;
-			}
+	// When mmap first allocates a pgprot of a pte, it marks the page with no write permission.
+	// Thus, to use the zero page frame, we have to check pgprot doesn't have RW permission.
+	// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
+	if (paddr) {
+		// This optimization slows down the overall performance. Disable temporary before delete.
+		slot = radix_tree_lookup_slot(paddr_to_folio, paddr);
+		orig_folio = slot != NULL ? rcu_dereference_protected(*slot, true) : NULL;
+		if (orig_folio != NULL && folio_ref_count(orig_folio) > 1) {
+			folio = sbpf_mem_copy_on_write(current->sbpf, orig_folio, slot,
+						       true);
+		} else {
+			folio = orig_folio;
 		}
+		if (!IS_ERR_OR_NULL(folio)) {
+			entry = mk_pte(&folio->page, pgprot);
+			entry = pte_sw_mkyoung(entry);
+			entry = pte_mkwrite(entry);
+			goto set_pte;
+		}
+	}
 
-		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+	folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-		folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
-		sbpf_reverse_insert(folio->page.sbpf_reverse, vaddr);
+	folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
+	sbpf_reverse_insert_range(folio->page.sbpf_reverse, vaddr, vaddr + len);
 #endif
-		new_folio = 1;
-		if (unlikely(!folio))
-			return 0;
-		if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
-			return 0;
+	new_folio = 1;
+	if (unlikely(!folio))
+		return 0;
+	if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
+		return 0;
 
-		entry = mk_pte(&folio->page, pgprot);
-		entry = pte_sw_mkyoung(entry);
-		entry = pte_mkwrite(entry);
+	entry = mk_pte(&folio->page, pgprot);
+	entry = pte_sw_mkyoung(entry);
+	entry = pte_mkwrite(entry);
 
-		inc_mm_counter(mm, MM_ANONPAGES);
+	inc_mm_counter(mm, MM_ANONPAGES);
 
 set_pte:
-		set_pte_at(mm, vaddr, pte, entry);
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-		if (!new_folio) {
-			ret = sbpf_reverse_insert(folio->page.sbpf_reverse, vaddr);
-			atomic_inc(&folio->_mapcount);
-			if (unlikely(ret)) {
-				printk("Error in radix_tree_insert 0x%lx error %d\n",
-				       vaddr, ret);
-				return 0;
-			}
-		}
-#endif
-		// We allocate new page, but original paddr is empty.
-		// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
-		// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
-		if (paddr && folio != NULL && new_folio) {
-			// Caching the pte entry to the shadow page trie.
-			if (!slot) {
-				ret = radix_tree_insert(paddr_to_folio, paddr, folio);
-				if (unlikely(ret)) {
-					printk("Error in trie_insert 0x%lx error %d\n",
-					       paddr, ret);
-					return 0;
-				}
-			} else {
-				radix_tree_replace_slot(paddr_to_folio, slot, folio);
-			}
-		}
-		pte_unmap(pte);
-		// TODO!. We have to elaborate the boundary mechanism.
-		if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
-			current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
-		}
-
-		return 1;
-	} else {
+	ret = touch_page_table_pte_range(current->mm, vaddr, vaddr + len, __set_pte,
+					 &entry);
+	if (unlikely(ret)) {
 		printk("Invalid copy-on-write task %d ret: %d 0x%lx\n", current->pid, ret,
 		       vaddr);
+		return 1;
+	}
+
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+	if (!new_folio) {
+		ret = sbpf_reverse_insert_range(folio->page.sbpf_reverse, vaddr,
+						vaddr + len);
+		atomic_inc(&folio->_mapcount);
+		if (unlikely(ret)) {
+			printk("Error in radix_tree_insert 0x%lx error %d\n", vaddr, ret);
+			return 0;
+		}
+	}
+#endif
+	// We allocate new page, but original paddr is empty.
+	// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
+	// Todo! After allocation, pgprot will be different from the kernel's vma, so we have to fix it.
+	if (paddr && folio != NULL && new_folio) {
+		// Caching the pte entry to the shadow page trie.
+		if (!slot) {
+			ret = radix_tree_insert(paddr_to_folio, paddr, folio);
+			if (unlikely(ret)) {
+				printk("Error in trie_insert 0x%lx error %d\n", paddr,
+				       ret);
+				return 0;
+			}
+		} else {
+			radix_tree_replace_slot(paddr_to_folio, slot, folio);
+		}
+	}
+	pte_unmap(pte);
+	// TODO!. We have to elaborate the boundary mechanism.
+	if (current->sbpf->max_alloc_end < vaddr + PAGE_SIZE) {
+		current->sbpf->max_alloc_end = vaddr + PAGE_SIZE;
 	}
 
 	return 0;
 }
 
-static int bpf_unset_pte(unsigned long address, size_t len)
+static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 {
-	struct mm_struct *mm = current->mm;
-	struct mmu_gather tlb;
-	struct folio *folio = NULL;
-	pte_t *pte;
-	pte_t ptent;
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+	struct folio *folio;
 	unsigned long paddr;
-#endif
+	struct mmu_gather *tlb = aux;
 
-	tlb_gather_mmu(&tlb, mm);
-	address = address & PAGE_MASK;
-	pte = walk_page_table_pte(mm, address);
-	if (pte == NULL)
-		goto error;
-	ptent = *pte;
-	if (pte_none(ptent))
-		goto error;
-
-	if (pte_present(ptent)) {
-		folio = page_folio(pte_page(ptent));
+	folio = page_folio(pte_page(*pte));
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-		if (folio_ref_count(folio) > 1) {
-			folio = sbpf_mem_copy_on_write(current->sbpf, folio, NULL, true);
-			if (IS_ERR_OR_NULL(folio)) {
-				printk("Error in copy on write on bpf_unmap_pte 0x%lx\n",
-				       address);
-				goto error;
-			}
+	if (folio_ref_count(folio) > 1) {
+		folio = sbpf_mem_copy_on_write(current->sbpf, folio, NULL, true);
+		if (IS_ERR_OR_NULL(folio)) {
+			printk("Error in copy on write on bpf_unmap_pte 0x%lx\n", addr);
+			return -EINVAL;
 		}
-#endif
-		ptep_get_and_clear(mm, address, pte);
-		pte_clear(mm, address, pte);
-		tlb_remove_tlb_entry(&tlb, pte, address);
 	}
+#endif
+	ptep_get_and_clear(current->mm, addr, pte);
+	pte_clear(current->mm, addr, pte);
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	sbpf_reverse_remove(folio->page.sbpf_reverse, address);
+	sbpf_reverse_remove(folio->page.sbpf_reverse, addr);
 	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
 		paddr = folio->page.sbpf_reverse->paddr;
 		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
@@ -431,17 +470,32 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 		folio->page.sbpf_reverse = NULL;
 		folio_put(folio);
 		dec_mm_counter(current->mm, MM_ANONPAGES);
+		tlb_remove_tlb_entry(tlb, pte, addr);
 	}
 #else
 	folio_put(folio);
 	dec_mm_counter(current->mm, MM_ANONPAGES);
 #endif
 
+	return 0;
+}
+
+static int bpf_unset_pte(unsigned long address, size_t len)
+{
+	struct mm_struct *mm = current->mm;
+	struct mmu_gather tlb;
+	int ret;
+
+	tlb_gather_mmu(&tlb, mm);
+
+	address = address & PAGE_MASK;
+	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &tlb);
+	if (unlikely(ret)) {
+		return 0;
+	}
 	tlb_finish_mmu(&tlb);
 
 	return 1;
-error:
-	return 0;
 }
 
 static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_flags,
