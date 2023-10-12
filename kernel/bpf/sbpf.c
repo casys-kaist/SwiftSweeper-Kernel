@@ -110,7 +110,7 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	len = PAGE_ALIGN(len + offset);
 	nr_pages = len / PAGE_SIZE;
 
-	pages = kmalloc_array(nr_pages, sizeof(*pages), GFP_KERNEL | GFP_ATOMIC);
+	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL | GFP_ATOMIC);
 
 	ret = get_user_pages_remote(current->mm, (unsigned long)uaddr, nr_pages,
 				    FOLL_WRITE, pages, NULL, NULL);
@@ -379,7 +379,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	void __rcu **slot;
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	struct sbpf_reverse_map_elem *cur;
-	unsigned long addr;
 	int ret;
 	pgprot_t pgprot;
 	pte_t entry;
@@ -440,8 +439,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 
 					if (unlikely(ret)) {
 						trace_printk(
-							"PID %d CHILD %d Error in walk page table addr:0x%lx\n",
-							current->pid, tsk->pid, addr);
+							"PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
+							current->pid, tsk->pid,
+							cur->start, cur->end);
 						sbpf_reverse_dump(
 							folio->page.sbpf_reverse);
 						return -EINVAL;
