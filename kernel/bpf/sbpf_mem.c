@@ -348,6 +348,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 #endif
 	ptep_get_and_clear(current->mm, addr, pte);
 	pte_clear(current->mm, addr, pte);
+	tlb_remove_tlb_entry(tlb, pte, addr);
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	sbpf_reverse_remove(folio->page.sbpf_reverse, addr);
 	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
@@ -362,7 +363,6 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 		folio->page.sbpf_reverse = NULL;
 		folio_put(folio);
 		dec_mm_counter(current->mm, MM_ANONPAGES);
-		tlb_remove_tlb_entry(tlb, pte, addr);
 	}
 #else
 	folio_put(folio);
