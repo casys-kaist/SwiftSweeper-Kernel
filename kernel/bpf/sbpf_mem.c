@@ -148,10 +148,17 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	return 0;
 }
 
-static int __set_pte(pte_t *pte, unsigned long addr, void *aux)
+struct set_pte_aux {
+	pte_t entry;
+	struct mmu_gather *tlb;
+};
+
+static int __set_pte(pte_t *pte, unsigned long addr, void *_aux)
 {
-	pte_t entry = *(pte_t *)aux;
-	set_pte_at(current->mm, addr, pte, entry);
+	struct set_pte_aux *aux = (struct set_pte_aux *)_aux;
+	set_pte_at(current->mm, addr, pte, aux->entry);
+	if (aux->tlb)
+		tlb_remove_tlb_entry(aux->tlb, pte, addr);
 	return 0;
 }
 
@@ -160,6 +167,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 {
 	struct sbpf_reverse_map_elem *cur;
 	unsigned long paddr;
+	struct set_pte_aux aux;
 	struct folio *folio;
 	int ret;
 	pte_t entry;
@@ -208,8 +216,10 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 	if (update_mappings) {
 		list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+			aux.entry = entry;
+			aux.tlb = NULL;
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-							__set_pte, &entry);
+							__set_pte, &aux);
 			if (unlikely(ret)) {
 				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
 				       ret, cur->start, cur->end);
@@ -231,6 +241,8 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	struct radix_tree_root *paddr_to_folio;
 	int ret;
 	int new_folio = 0;
+	struct mmu_gather tlb;
+	struct set_pte_aux aux;
 	pte_t *pte;
 	pte_t entry;
 	pgprot_t pgprot;
@@ -240,6 +252,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		return 0;
 
 	paddr_to_folio = &current->sbpf->page_fault.sbpf_mm->paddr_to_folio;
+	tlb_gather_mmu(&tlb, mm);
 
 	vaddr = vaddr & PAGE_MASK;
 	paddr = paddr & PAGE_MASK;
@@ -286,8 +299,11 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	inc_mm_counter(mm, MM_ANONPAGES);
 
 set_pte:
+	aux.entry = entry;
+	aux.tlb = &tlb;
 	ret = touch_page_table_pte_range(current->mm, vaddr, vaddr + len, __set_pte,
-					 &entry);
+					 &aux);
+	tlb_finish_mmu(&tlb);
 	if (unlikely(ret)) {
 		printk("Invalid copy-on-write task %d ret: %d 0x%lx\n", current->pid, ret,
 		       vaddr);
@@ -338,6 +354,9 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 
 	folio = page_folio(pte_page(*pte));
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+	// Temporary check the pte is mBPF folio by checking the reverse mapping exists.
+	if (!folio || !folio->page.sbpf_reverse)
+		return 0;
 	if (folio_ref_count(folio) > 1) {
 		folio = sbpf_mem_copy_on_write(current->sbpf, folio, NULL, true);
 		if (IS_ERR_OR_NULL(folio)) {
@@ -355,14 +374,24 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 		paddr = folio->page.sbpf_reverse->paddr;
 		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				  paddr);
-		paddr = folio->page.sbpf_reverse->paddr;
-		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				  paddr);
 		atomic_set(&folio->_mapcount, -1);
 		kfree(folio->page.sbpf_reverse);
 		folio->page.sbpf_reverse = NULL;
 		folio_put(folio);
 		dec_mm_counter(current->mm, MM_ANONPAGES);
+	} else {
+		if (addr < 0x4000000000) {
+			// Temporary fix. Have to fix.
+			paddr = folio->page.sbpf_reverse->paddr;
+			radix_tree_delete(
+				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				paddr);
+			atomic_set(&folio->_mapcount, -1);
+			kfree(folio->page.sbpf_reverse);
+			folio->page.sbpf_reverse = NULL;
+			folio_put(folio);
+			dec_mm_counter(current->mm, MM_ANONPAGES);
+		}
 	}
 #else
 	folio_put(folio);
