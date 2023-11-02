@@ -17,17 +17,10 @@ struct sbpf_alloc_kmem {
 	size_t nr_pages;
 	void *kaddr;
 	void *uaddr;
-	struct list_head list;
-};
-
-struct sbpf_alloc_folio {
-	struct folio *folio;
-	struct list_head list;
 };
 
 struct sbpf_task {
-	struct list_head alloc_kmems;
-	struct list_head alloc_folios;
+	struct radix_tree_root user_shared_pages;
 	// FixMe!. This max_alloc_end is dangerous to use with the kernel mmap struct.
 	// Have to use free_pgd_range with user space vma informations.
 	unsigned long max_alloc_end;
@@ -41,9 +34,10 @@ struct sbpf_task {
 	} sbpf_func;
 	// Used for handling page fault.
 	struct {
+		struct sbpf_mm_struct *sbpf_mm;
 		struct bpf_prog *prog;
 		void *aux;
-	} mm;
+	} page_fault;
 };
 
 struct bpf_sbpf_link {
@@ -53,9 +47,12 @@ struct bpf_sbpf_link {
 
 int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog);
 int bpf_prog_load_sbpf(struct bpf_prog *prog);
-int call_sbpf_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len);
+int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len);
+int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
+			   unsigned int flags);
+int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len);
 
-int copy_sbpf(struct task_struct *tsk);
+int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk);
 void exit_sbpf(struct task_struct *tsk);
 
 #endif
