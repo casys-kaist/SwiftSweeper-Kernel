@@ -39,6 +39,20 @@ int __sbpf_reverse_insert(struct sbpf_reverse_map_elem *map_elem, unsigned long 
 	return -EINVAL;
 }
 
+int __sbpf_reverse_insert_range(struct sbpf_reverse_map_elem *map_elem,
+				unsigned long start, unsigned long end)
+{
+	if (start + (end - start) == map_elem->start) {
+		map_elem->start = start;
+		return 0;
+	} else if (start == map_elem->end) {
+		map_elem->end = end;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
 int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr)
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
@@ -70,18 +84,29 @@ int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr)
 int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 			      unsigned long end)
 {
-	int ret = 0;
-	unsigned long addr = start;
+	struct sbpf_reverse_map_elem *cur = NULL;
+	struct sbpf_reverse_map_elem *next = NULL;
+	size_t len = end - start;
 
 	if (map == NULL)
 		return -EINVAL;
 
-	while (addr < end) {
-		ret = sbpf_reverse_insert(map, addr);
-		if (ret)
-			return ret;
-		addr += PAGE_SIZE;
+	list_for_each_entry(cur, &map->elem, list) {
+		next = list_next_entry(cur, list);
+		// Merge
+		if (next != NULL && cur->end == start && cur->end + len == next->start) {
+			cur->end = next->end;
+			list_del(&next->list);
+			kfree(next);
+			return 0;
+		}
+		if (!__sbpf_reverse_insert_range(cur, start, end))
+			return 0;
 	}
+
+	next = init_reverse_map_elem(start);
+	next->end = end;
+	list_add(&next->list, &map->elem);
 
 	return 0;
 }

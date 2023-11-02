@@ -50,11 +50,12 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	int ret;
 
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
-					__handle_page_fault, sbpf);
-
-	if (!ret)
-		return 0;
+	if (flags & FAULT_FLAG_WRITE) {
+		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
+						__handle_page_fault, sbpf);
+		if (!ret)
+			return 0;
+	}
 #endif
 
 	sbpf_fault.vaddr = fault_addr;
