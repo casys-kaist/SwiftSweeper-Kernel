@@ -26,7 +26,8 @@ void *sbpf_reverse_init(unsigned long paddr)
 	return map;
 }
 
-int __sbpf_reverse_insert(struct sbpf_reverse_map_elem *map_elem, unsigned long addr)
+static inline int __sbpf_reverse_insert(struct sbpf_reverse_map_elem *map_elem,
+					unsigned long addr)
 {
 	if (addr + PAGE_SIZE == map_elem->start) {
 		map_elem->start = addr;
@@ -39,14 +40,29 @@ int __sbpf_reverse_insert(struct sbpf_reverse_map_elem *map_elem, unsigned long 
 	return -EINVAL;
 }
 
-int __sbpf_reverse_insert_range(struct sbpf_reverse_map_elem *map_elem,
-				unsigned long start, unsigned long end)
+static inline int __sbpf_reverse_insert_range(struct sbpf_reverse_map_elem *map_elem,
+					      unsigned long start, unsigned long end)
 {
 	if (start + (end - start) == map_elem->start) {
 		map_elem->start = start;
 		return 0;
 	} else if (start == map_elem->end) {
 		map_elem->end = end;
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static inline int
+__sbpf_reverse_insert_range_reverse(struct sbpf_reverse_map_elem *map_elem,
+				    unsigned long start, unsigned long end)
+{
+	if (start + (end - start) == map_elem->end) {
+		map_elem->end = end;
+		return 0;
+	} else if (start == map_elem->start) {
+		map_elem->start = start;
 		return 0;
 	}
 
@@ -85,28 +101,28 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 			      unsigned long end)
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
-	struct sbpf_reverse_map_elem *next = NULL;
+	struct sbpf_reverse_map_elem *prev = NULL;
 	size_t len = end - start;
 
 	if (map == NULL)
 		return -EINVAL;
 
-	list_for_each_entry(cur, &map->elem, list) {
-		next = list_next_entry(cur, list);
+	list_for_each_entry_reverse(cur, &map->elem, list) {
+		prev = list_prev_entry(cur, list);
 		// Merge
-		if (next != NULL && cur->end == start && cur->end + len == next->start) {
-			cur->end = next->end;
-			list_del(&next->list);
-			kfree(next);
+		if (prev != NULL && cur->start == end && cur->start - len == prev->end) {
+			cur->start = prev->start;
+			list_del(&prev->list);
+			kfree(prev);
 			return 0;
 		}
-		if (!__sbpf_reverse_insert_range(cur, start, end))
+		if (!__sbpf_reverse_insert_range_reverse(cur, start, end))
 			return 0;
 	}
 
-	next = init_reverse_map_elem(start);
-	next->end = end;
-	list_add(&next->list, &map->elem);
+	cur = init_reverse_map_elem(start);
+	cur->end = end;
+	list_add(&cur->list, &map->elem);
 
 	return 0;
 }
@@ -148,6 +164,60 @@ int sbpf_reverse_remove(struct sbpf_reverse_map *map, unsigned long addr)
 	}
 
 	return -ENOENT;
+}
+
+int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
+			      uint64_t end)
+{
+	struct sbpf_reverse_map_elem *cur = NULL;
+	uint64_t addr = start;
+	// struct sbpf_reverse_map_elem *temp = NULL;
+	// struct sbpf_reverse_map_elem *new_elem = NULL;
+
+	if (map == NULL)
+		return -EINVAL;
+
+	while (addr < end) {
+		list_for_each_entry(cur, &map->elem, list) {
+			__sbpf_reverse_remove(cur, addr);
+			if (cur->start == cur->end) {
+				list_del(&cur->list);
+				kfree(cur);
+				break;
+			}
+		}
+		addr += PAGE_SIZE;
+	}
+
+	return 0;
+
+	// list_for_each_entry_safe(cur, temp, &map->elem, list) {
+	// 	if (cur->start >= end) {
+	// 		break;
+	// 	}
+
+	// 	if (cur->start < start) {
+	// 		if (cur->end <= start) {
+	// 			continue;
+	// 		} else if (cur->end <= end) {
+	// 			cur->end = start;
+	// 		} else {
+	// 			new_elem = init_reverse_map_elem(end);
+	// 			new_elem->end = cur->end;
+	// 			cur->end = start;
+	// 			list_add(&new_elem->list, &cur->list);
+	// 		}
+	// 	} else if (cur->start >= start) {
+	// 		if (cur->end <= end) {
+	// 			list_del(&cur->list);
+	// 			kfree(cur);
+	// 		} else {
+	// 			cur->start = end;
+	// 		}
+	// 	}
+	// }
+
+	return 0;
 }
 
 int sbpf_reverse_empty(struct sbpf_reverse_map *map)

@@ -439,10 +439,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 						__set_write_protected_new_task, &entry);
 
 					if (unlikely(ret)) {
-						trace_printk(
-							"PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
-							current->pid, tsk->pid,
-							cur->start, cur->end);
+						printk("PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
+						       current->pid, tsk->pid, cur->start,
+						       cur->end);
 						sbpf_reverse_dump(
 							folio->page.sbpf_reverse);
 						return -EINVAL;

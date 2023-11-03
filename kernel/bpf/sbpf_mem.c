@@ -320,11 +320,19 @@ set_pte:
 	return 0;
 }
 
-static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
+struct unset_pte_aux {
+	struct mmu_gather *tlb;
+	uint64_t start_addr;
+	struct folio *folio;
+};
+
+static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 {
 	struct folio *folio;
 	unsigned long paddr;
-	struct mmu_gather *tlb = aux;
+	struct unset_pte_aux *aux = _aux;
+	struct mmu_gather *tlb = aux->tlb;
+	int ret;
 
 	folio = page_folio(pte_page(*pte));
 #ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
@@ -342,31 +350,52 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *aux)
 	ptep_get_and_clear(current->mm, addr, pte);
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	sbpf_reverse_remove(folio->page.sbpf_reverse, addr);
-	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
-		paddr = folio->page.sbpf_reverse->paddr;
-		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				  paddr);
-		atomic_set(&folio->_mapcount, -1);
-		kfree(folio->page.sbpf_reverse);
-		folio->page.sbpf_reverse = NULL;
-		folio_put(folio);
-		dec_mm_counter(current->mm, MM_ANONPAGES);
-	} else {
-		if (addr < 0x4000000000) {
+
+	if (aux->folio == NULL) {
+		aux->folio = folio;
+		aux->start_addr = addr;
+		return 0;
+	}
+
+	if (aux->folio != folio) {
+		if (aux->start_addr < 0x4000000000) {
 			// Temporary fix. Have to fix.
-			paddr = folio->page.sbpf_reverse->paddr;
+			paddr = aux->folio->page.sbpf_reverse->paddr;
 			radix_tree_delete(
 				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				paddr);
 			atomic_set(&folio->_mapcount, -1);
-			kfree(folio->page.sbpf_reverse);
-			folio->page.sbpf_reverse = NULL;
-			folio_put(folio);
+			sbpf_reverse_delete(aux->folio->page.sbpf_reverse);
+			aux->folio->page.sbpf_reverse = NULL;
+			folio_put(aux->folio);
 			dec_mm_counter(current->mm, MM_ANONPAGES);
+		} else {
+			ret = sbpf_reverse_remove_range(aux->folio->page.sbpf_reverse,
+							aux->start_addr, addr);
+			if (unlikely(ret)) {
+				printk("Error in sbpf_reverse_remove_range 0x%lx 0x%lx\n",
+				       (unsigned long)aux->start_addr, addr);
+				return -EINVAL;
+			}
+			if (sbpf_reverse_empty(aux->folio->page.sbpf_reverse)) {
+				paddr = aux->folio->page.sbpf_reverse->paddr;
+				radix_tree_delete(
+					&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+					paddr);
+				atomic_set(&folio->_mapcount, -1);
+				kfree(aux->folio->page.sbpf_reverse);
+				aux->folio->page.sbpf_reverse = NULL;
+				folio_put(aux->folio);
+				dec_mm_counter(current->mm, MM_ANONPAGES);
+			}
 		}
+
+		aux->folio = folio;
+		aux->start_addr = addr;
 	}
+
+#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+
 #else
 	folio_put(folio);
 	dec_mm_counter(current->mm, MM_ANONPAGES);
@@ -379,17 +408,53 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 {
 	struct mm_struct *mm = current->mm;
 	struct mmu_gather tlb;
+	struct unset_pte_aux aux;
+	uint64_t addr;
+	unsigned long paddr;
 	int ret;
 
 	tlb_gather_mmu(&tlb, mm);
 
 	address = address & PAGE_MASK;
-	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &tlb);
+	aux.tlb = &tlb;
+	aux.folio = NULL;
+	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux);
+
 	if (unlikely(ret)) {
 		tlb_finish_mmu(&tlb);
 		return 0;
 	}
 	tlb_finish_mmu(&tlb);
+
+	if (aux.folio == NULL)
+		return 0;
+
+	addr = aux.start_addr;
+	if (addr < 0x4000000000) {
+		// Temporary fix. Have to fix.
+		paddr = aux.folio->page.sbpf_reverse->paddr;
+		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				  paddr);
+		atomic_set(&aux.folio->_mapcount, -1);
+		sbpf_reverse_delete(aux.folio->page.sbpf_reverse);
+		aux.folio->page.sbpf_reverse = NULL;
+		folio_put(aux.folio);
+		dec_mm_counter(current->mm, MM_ANONPAGES);
+	} else {
+		sbpf_reverse_remove_range(aux.folio->page.sbpf_reverse, aux.start_addr,
+					  address + len);
+		if (sbpf_reverse_empty(aux.folio->page.sbpf_reverse)) {
+			paddr = aux.folio->page.sbpf_reverse->paddr;
+			radix_tree_delete(
+				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				paddr);
+			atomic_set(&aux.folio->_mapcount, -1);
+			kfree(aux.folio->page.sbpf_reverse);
+			aux.folio->page.sbpf_reverse = NULL;
+			folio_put(aux.folio);
+			dec_mm_counter(current->mm, MM_ANONPAGES);
+		}
+	}
 
 	return 1;
 }

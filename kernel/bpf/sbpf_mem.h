@@ -53,6 +53,8 @@ int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr);
 int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 			      unsigned long end);
 int sbpf_reverse_remove(struct sbpf_reverse_map *map, unsigned long addr);
+int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
+			      uint64_t end);
 int sbpf_reverse_empty(struct sbpf_reverse_map *map);
 void sbpf_reverse_delete(struct sbpf_reverse_map *map);
 struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src);
@@ -60,9 +62,9 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map);
 
 /* APIs for page table management */
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long addr, unsigned long end,
-			pte_func func, void *aux);
-int touch_page_table_pte_range(struct mm_struct *mm, unsigned long addr, unsigned long end,
-			 pte_func func, void *aux);
+			      pte_func func, void *aux);
+int touch_page_table_pte_range(struct mm_struct *mm, unsigned long addr,
+			       unsigned long end, pte_func func, void *aux);
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio,
 				     void __rcu **slot, int update_mappings);
 #endif
