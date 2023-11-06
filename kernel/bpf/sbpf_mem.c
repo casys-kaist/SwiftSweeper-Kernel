@@ -326,10 +326,46 @@ struct unset_pte_aux {
 	struct folio *folio;
 };
 
+static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *folio)
+{
+	uint64_t paddr;
+	int ret;
+
+	if (start < 0x4000000000) {
+		// Temporary fix. Have to fix.
+		paddr = folio->page.sbpf_reverse->paddr;
+		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				  paddr);
+		sbpf_reverse_delete(folio->page.sbpf_reverse);
+		folio->page.sbpf_reverse = NULL;
+		folio_put(folio);
+		dec_mm_counter(current->mm, MM_ANONPAGES);
+	} else {
+		ret = sbpf_reverse_remove_range(folio->page.sbpf_reverse, start, end);
+		if (unlikely(ret)) {
+			printk("Error in sbpf_reverse_remove_range 0x%lx 0x%lx\n",
+			       (unsigned long)start, (unsigned long)end);
+			return -EINVAL;
+		}
+		if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
+			paddr = folio->page.sbpf_reverse->paddr;
+			radix_tree_delete(
+				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
+				paddr);
+			atomic_set(&folio->_mapcount, -1);
+			sbpf_reverse_delete(folio->page.sbpf_reverse);
+			folio->page.sbpf_reverse = NULL;
+			folio_put(folio);
+			dec_mm_counter(current->mm, MM_ANONPAGES);
+		}
+	}
+
+	return 0;
+}
+
 static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 {
 	struct folio *folio;
-	unsigned long paddr;
 	struct unset_pte_aux *aux = _aux;
 	struct mmu_gather *tlb = aux->tlb;
 	int ret;
@@ -358,37 +394,9 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	}
 
 	if (aux->folio != folio) {
-		if (aux->start_addr < 0x4000000000) {
-			// Temporary fix. Have to fix.
-			paddr = aux->folio->page.sbpf_reverse->paddr;
-			radix_tree_delete(
-				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				paddr);
-			atomic_set(&folio->_mapcount, -1);
-			sbpf_reverse_delete(aux->folio->page.sbpf_reverse);
-			aux->folio->page.sbpf_reverse = NULL;
-			folio_put(aux->folio);
-			dec_mm_counter(current->mm, MM_ANONPAGES);
-		} else {
-			ret = sbpf_reverse_remove_range(aux->folio->page.sbpf_reverse,
-							aux->start_addr, addr);
-			if (unlikely(ret)) {
-				printk("Error in sbpf_reverse_remove_range 0x%lx 0x%lx\n",
-				       (unsigned long)aux->start_addr, addr);
-				return -EINVAL;
-			}
-			if (sbpf_reverse_empty(aux->folio->page.sbpf_reverse)) {
-				paddr = aux->folio->page.sbpf_reverse->paddr;
-				radix_tree_delete(
-					&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-					paddr);
-				atomic_set(&folio->_mapcount, -1);
-				kfree(aux->folio->page.sbpf_reverse);
-				aux->folio->page.sbpf_reverse = NULL;
-				folio_put(aux->folio);
-				dec_mm_counter(current->mm, MM_ANONPAGES);
-			}
-		}
+		ret = unset_trie_entry(aux->start_addr, addr, aux->folio);
+		if (ret)
+			return ret;
 
 		aux->folio = folio;
 		aux->start_addr = addr;
@@ -409,8 +417,6 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	struct mm_struct *mm = current->mm;
 	struct mmu_gather tlb;
 	struct unset_pte_aux aux;
-	uint64_t addr;
-	unsigned long paddr;
 	int ret;
 
 	tlb_gather_mmu(&tlb, mm);
@@ -429,32 +435,9 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	if (aux.folio == NULL)
 		return 0;
 
-	addr = aux.start_addr;
-	if (addr < 0x4000000000) {
-		// Temporary fix. Have to fix.
-		paddr = aux.folio->page.sbpf_reverse->paddr;
-		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				  paddr);
-		atomic_set(&aux.folio->_mapcount, -1);
-		sbpf_reverse_delete(aux.folio->page.sbpf_reverse);
-		aux.folio->page.sbpf_reverse = NULL;
-		folio_put(aux.folio);
-		dec_mm_counter(current->mm, MM_ANONPAGES);
-	} else {
-		sbpf_reverse_remove_range(aux.folio->page.sbpf_reverse, aux.start_addr,
-					  address + len);
-		if (sbpf_reverse_empty(aux.folio->page.sbpf_reverse)) {
-			paddr = aux.folio->page.sbpf_reverse->paddr;
-			radix_tree_delete(
-				&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				paddr);
-			atomic_set(&aux.folio->_mapcount, -1);
-			kfree(aux.folio->page.sbpf_reverse);
-			aux.folio->page.sbpf_reverse = NULL;
-			folio_put(aux.folio);
-			dec_mm_counter(current->mm, MM_ANONPAGES);
-		}
-	}
+	ret = unset_trie_entry(aux.start_addr, aux.start_addr + len, aux.folio);
+	if (unlikely(ret))
+		return 0;
 
 	return 1;
 }
