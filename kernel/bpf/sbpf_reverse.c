@@ -1,3 +1,4 @@
+#include <linux/maple_tree.h>
 #include <linux/list.h>
 #include <linux/types.h>
 #include <linux/slab.h>
@@ -6,6 +7,86 @@
 
 #include "sbpf_mem.h"
 
+#ifdef USE_MAPLE_TREE
+void *sbpf_reverse_init(unsigned long paddr)
+{
+	struct sbpf_reverse_map *map =
+		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
+	struct maple_tree *mt = kmalloc(sizeof(struct maple_tree), GFP_KERNEL);
+
+	mt_init(mt);
+	map->mt = mt;
+	map->paddr = paddr;
+
+	return map;
+}
+
+int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr)
+{
+	return sbpf_reverse_insert_range(map, addr, addr + PAGE_SIZE);
+}
+
+int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
+			      unsigned long end)
+{
+	// FixMe.
+	// This should be mtree_insert_range, but there exist multiple insertions with the overlapped range.
+	return mtree_store_range(map->mt, start, end - 1, map, GFP_KERNEL);
+}
+
+int sbpf_reverse_remove(struct sbpf_reverse_map *map, unsigned long addr)
+{
+	return sbpf_reverse_remove_range(map, addr, addr + PAGE_SIZE);
+}
+
+int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
+			      uint64_t end)
+{
+	return mtree_store_range(map->mt, start, end - 1, NULL, GFP_KERNEL);
+}
+
+int sbpf_reverse_empty(struct sbpf_reverse_map *map)
+{
+	return mtree_empty(map->mt);
+}
+
+void sbpf_reverse_delete(struct sbpf_reverse_map *map)
+{
+	mtree_destroy(map->mt);
+	kfree(map);
+}
+
+struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
+{
+	struct sbpf_reverse_map *new_map = sbpf_reverse_init(src->paddr);
+	void *entry = NULL;
+	MA_STATE(mas, src->mt, 0, 0);
+
+	mas_for_each(&mas, entry, ULONG_MAX)
+	{
+		if (entry == NULL)
+			continue;
+		mtree_insert_range(new_map->mt, mas.index, mas.last, new_map, GFP_KERNEL);
+	}
+
+	return new_map;
+}
+
+void sbpf_reverse_dump(struct sbpf_reverse_map *map)
+{
+	void *entry = NULL;
+	MA_STATE(mas, map->mt, 0, 0);
+
+	printk(KERN_INFO "dump reverse map:\n");
+	mas_for_each(&mas, entry, ULONG_MAX)
+	{
+		printk(KERN_INFO "\tstart: %lx, end: %lx entry 0x%lx\n",
+		       mas.index & PAGE_MASK, (mas.last & PAGE_MASK) + PAGE_SIZE,
+		       (unsigned long)entry);
+	}
+}
+
+#else
 struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long addr)
 {
 	struct sbpf_reverse_map_elem *map_elem =
@@ -107,22 +188,28 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 	if (map == NULL)
 		return -EINVAL;
 
-	list_for_each_entry_reverse(cur, &map->elem, list) {
-		prev = list_prev_entry(cur, list);
-		// Merge
-		if (prev != NULL && cur->start == end && cur->start - len == prev->end) {
-			cur->start = prev->start;
-			list_del(&prev->list);
-			kfree(prev);
-			return 0;
-		}
-		if (!__sbpf_reverse_insert_range_reverse(cur, start, end))
-			return 0;
-	}
+	// list_for_each_entry_reverse(cur, &map->elem, list) {
+	// 	prev = list_prev_entry(cur, list);
+	// 	// Merge
+	// 	if (prev != NULL && cur->start == end && cur->start - len == prev->end) {
+	// 		cur->start = prev->start;
+	// 		list_del(&prev->list);
+	// 		kfree(prev);
+	// 		return 0;
+	// 	}
+	// 	if (!__sbpf_reverse_insert_range_reverse(cur, start, end))
+	// 		return 0;
+	// }
 
-	cur = init_reverse_map_elem(start);
-	cur->end = end;
-	list_add(&cur->list, &map->elem);
+	// cur = init_reverse_map_elem(start);
+	// cur->end = end;
+	// list_add(&cur->list, &map->elem);
+
+	while (start < end) {
+		if (sbpf_reverse_insert(map, start))
+			return 0;
+		start += PAGE_SIZE;
+	}
 
 	return 0;
 }
@@ -277,3 +364,4 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 		printk(KERN_INFO "\tstart: %lx, end: %lx\n", cur->start, cur->end);
 	}
 }
+#endif

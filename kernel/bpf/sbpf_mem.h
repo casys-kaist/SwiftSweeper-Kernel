@@ -3,8 +3,11 @@
 
 #include <linux/types.h>
 #include <linux/radix-tree.h>
+#include <linux/maple_tree.h>
 
 #define TRI_SIZE 512
+
+#define USE_MAPLE_TREE 1
 
 /* struct sbpf_reverse_map: [start , end) */
 struct sbpf_reverse_map_elem {
@@ -15,7 +18,11 @@ struct sbpf_reverse_map_elem {
 
 struct sbpf_reverse_map {
 	unsigned long paddr;
+#ifdef USE_MAPLE_TREE
+	struct maple_tree *mt;
+#else
 	struct list_head elem;
+#endif
 };
 
 struct sbpf_mm_struct {
