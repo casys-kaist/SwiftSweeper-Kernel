@@ -72,7 +72,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						 addr != next_pmd);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
-		} while (p4d++, addr = next_pgd, addr != next_pgd);
+		} while (p4d++, addr = next_p4d, addr != next_pgd);
 	} while (pgd++, addr = next_pgd, addr != end);
 
 	return 0;
@@ -142,7 +142,7 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						 addr != next_pmd);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
-		} while (p4d++, addr = next_pgd, addr != next_pgd);
+		} while (p4d++, addr = next_p4d, addr != next_pgd);
 	} while (pgd++, addr = next_pgd, addr != end);
 
 	return 0;
