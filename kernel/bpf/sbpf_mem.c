@@ -259,7 +259,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	pgprot.pgprot = prot;
 
 	if (unlikely(!current->sbpf))
-		return 0;
+		return -EINVAL;
 	else if (unlikely(paddr == 0 || len == 0))
 		return -EINVAL;
 
@@ -289,9 +289,9 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
 	new_folio = 1;
 	if (unlikely(!folio))
-		return 0;
+		return -ENOMEM;
 	if (mem_cgroup_charge(folio, mm, GFP_KERNEL))
-		return 0;
+		return -ENOMEM;
 
 	entry = mk_pte(&folio->page, pgprot);
 	entry = pte_sw_mkyoung(entry);
@@ -305,7 +305,7 @@ set_pte:
 	if (unlikely(ret)) {
 		printk("Invalid touch page pte range %d ret: %d [0x%lx, 0x%lx)\n",
 		       current->pid, ret, vaddr, vaddr + len);
-		return 1;
+		return -EINVAL;
 	}
 
 	// sbpf_reverse_dump(folio->page.sbpf_reverse);
@@ -314,7 +314,7 @@ set_pte:
 		printk("Error in insert reverse map 0x%lx (0x%lx) error %d\n", vaddr, len,
 		       ret);
 		sbpf_reverse_dump(folio->page.sbpf_reverse);
-		return 1;
+		return -EINVAL;
 	}
 	// We allocate new page, but original paddr is empty.
 	// Thus, we have to touch the trie structure for the shadow page and set the shared pte.
@@ -326,7 +326,7 @@ set_pte:
 			if (unlikely(ret)) {
 				printk("Error in trie_insert 0x%lx error %d\n", paddr,
 				       ret);
-				return 1;
+				return -EINVAL;
 			}
 		} else {
 			radix_tree_replace_slot(paddr_to_folio, slot, folio);
@@ -413,7 +413,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 
 	if (aux->folio != folio) {
 		ret = unset_trie_entry(aux->start_addr, addr, aux->folio);
-		if (ret)
+		if (unlikely(ret))
 			return ret;
 
 		aux->folio = folio;
@@ -440,7 +440,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 
 	if (unlikely(ret)) {
 		tlb_finish_mmu(&tlb);
-		return 0;
+		return ret;
 	}
 	tlb_finish_mmu(&tlb);
 
@@ -449,9 +449,9 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 
 	ret = unset_trie_entry(aux.start_addr, aux.start_addr + len, aux.folio);
 	if (unlikely(ret))
-		return 0;
+		return ret;
 
-	return 1;
+	return 0;
 }
 
 static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_flags,
@@ -521,9 +521,10 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 	}
 	tlb_finish_mmu(&tlb);
 
-	return 1;
-error:
 	return 0;
+
+error:
+	return -EINVAL;
 }
 
 BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long, paddr,
@@ -532,7 +533,7 @@ BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long,
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
-		return 0;
+		return -EINVAL;
 
 	return bpf_set_pte(vaddr, len, paddr, vmf_flags, prot);
 }
@@ -548,7 +549,7 @@ BPF_CALL_2(bpf_unset_page_table, unsigned long, vaddr, size_t, len)
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
-		return 0;
+		return -EINVAL;
 
 	return bpf_unset_pte(vaddr, len);
 }
@@ -565,7 +566,7 @@ BPF_CALL_5(bpf_touch_page_table, unsigned long, vaddr, size_t, len, unsigned lon
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
-		return 0;
+		return -EINVAL;
 
 	return bpf_touch_pte(vaddr, len, vmf_flags, prot);
 }
