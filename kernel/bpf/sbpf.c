@@ -52,7 +52,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 
 	if (flags & FAULT_FLAG_WRITE) {
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
-						__handle_page_fault, sbpf);
+						__handle_page_fault, sbpf, false);
 		if (!ret)
 			return 0;
 	}
@@ -438,7 +438,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					ret = walk_page_table_pte_range(
 						current->mm, mas.index & PAGE_MASK,
 						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_write_protected_current, &pgprot);
+						__set_write_protected_current, &pgprot, false);
 
 					entry = mk_pte(&folio->page, pgprot);
 					entry = pte_sw_mkyoung(entry);
@@ -464,7 +464,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					       cur->start, cur->end);
 					ret = walk_page_table_pte_range(
 						current->mm, cur->start, cur->end,
-						__set_write_protected_current, &pgprot);
+						__set_write_protected_current, &pgprot, false);
 
 					entry = mk_pte(&folio->page, pgprot);
 					entry = pte_sw_mkyoung(entry);

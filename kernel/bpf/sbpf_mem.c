@@ -20,7 +20,7 @@
 #include "sbpf_mem.h"
 
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
-			      unsigned long end, pte_func func, void *aux)
+			      unsigned long end, pte_func func, void *aux, bool continue_walk)
 {
 	int ret;
 	pgd_t *pgd;
@@ -40,31 +40,46 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	pgd = pgd_offset(mm, addr);
 	do {
 		next_pgd = pgd_addr_end(addr, end);
-		if (pgd_none_or_clear_bad(pgd))
+		if (pgd_none_or_clear_bad(pgd)) {
+			if (continue_walk)
+				continue;
 			return -ENOENT;
+		}
 
 		p4d = p4d_offset(pgd, addr);
 		do {
 			next_p4d = p4d_addr_end(addr, end);
-			if (p4d_none_or_clear_bad(p4d))
+			if (p4d_none_or_clear_bad(p4d)) {
+				if (continue_walk)
+					continue;
 				return -ENOENT;
+			}
 
 			pud = pud_offset(p4d, addr);
 			do {
 				next_pud = pud_addr_end(addr, end);
-				if (pud_none_or_clear_bad(pud))
+				if (pud_none_or_clear_bad(pud)) {
+					if (continue_walk)
+						continue;
 					return -ENOENT;
+				}
 
 				pmd = pmd_offset(pud, addr);
 				do {
 					next_pmd = pmd_addr_end(addr, end);
-					if (pmd_none_or_clear_bad(pmd))
+					if (pmd_none_or_clear_bad(pmd)) {
+						if (continue_walk)
+							continue;
 						return -ENOENT;
+					}
 
 					pte = pte_offset_map(pmd, addr);
 					do {
-						if (pte_none(*pte))
+						if (pte_none(*pte)) {
+							if (continue_walk)
+								continue;
 							return -ENOENT;
+						}
 						ret = func(pte, addr, aux);
 						if (unlikely(ret))
 							return ret;
@@ -222,7 +237,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 				continue;
 			ret = walk_page_table_pte_range(
 				current->mm, mas.index & PAGE_MASK,
-				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_pte, &entry);
+				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_pte, &entry, false);
 			if (unlikely(ret)) {
 				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
 				       ret, mas.index, mas.last);
@@ -231,7 +246,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 #else
 		list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-							__set_pte, &entry);
+							__set_pte, &entry, false);
 			if (unlikely(ret)) {
 				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
 				       ret, cur->start, cur->end);
@@ -429,6 +444,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	struct mmu_gather tlb;
 	struct unset_pte_aux aux;
 	int ret;
+	bool continue_walk;
 
 	tlb_gather_mmu(&tlb, mm);
 
@@ -436,9 +452,11 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	aux.tlb = &tlb;
 	aux.folio = NULL;
 
-	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux);
+	continue_walk = 0x100000000 <= address && address + len < 0x4000000000; // for madvise
+	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux, continue_walk);
 
 	if (unlikely(ret)) {
+		printk("Error in bpf_unset_pte (addr : 0x%lx, len : 0x%lx)\n", address, len);
 		tlb_finish_mmu(&tlb);
 		return ret;
 	}
