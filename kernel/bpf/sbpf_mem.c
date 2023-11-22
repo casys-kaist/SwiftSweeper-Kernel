@@ -48,7 +48,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 
 		p4d = p4d_offset(pgd, addr);
 		do {
-			next_p4d = p4d_addr_end(addr, end);
+			next_p4d = p4d_addr_end(addr, next_pgd);
 			if (p4d_none_or_clear_bad(p4d)) {
 				if (continue_walk)
 					continue;
@@ -57,7 +57,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 
 			pud = pud_offset(p4d, addr);
 			do {
-				next_pud = pud_addr_end(addr, end);
+				next_pud = pud_addr_end(addr, next_p4d);
 				if (pud_none_or_clear_bad(pud)) {
 					if (continue_walk)
 						continue;
@@ -66,7 +66,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 
 				pmd = pmd_offset(pud, addr);
 				do {
-					next_pmd = pmd_addr_end(addr, end);
+					next_pmd = pmd_addr_end(addr, next_pud);
 					if (pmd_none_or_clear_bad(pmd)) {
 						if (continue_walk)
 							continue;
