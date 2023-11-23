@@ -381,8 +381,8 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	pgprot_t pgprot;
 	pte_t entry;
 #ifdef USE_MAPLE_TREE
-	struct sbpf_reverse_map *smap;
-	MA_STATE(mas, NULL, 0, 0);
+	struct sbpf_reverse_map *smap = NULL;
+	struct ma_state mas;
 #else
 	struct sbpf_reverse_map_elem *cur;
 #endif
@@ -427,14 +427,11 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					iter.index, folio);
 				/* Copy the pte from the parent process and make the parent pte as an write protected. */
 #ifdef USE_MAPLE_TREE
-				mas.tree = folio->page.sbpf_reverse->mt;
+				mas_init(&mas, folio->page.sbpf_reverse->mt, 0);
 				mas_for_each(&mas, smap, ULONG_MAX)
 				{
 					if (smap == NULL)
 						continue;
-					printk("dup page start 0x%lx end 0x%lx\n",
-					       mas.index & PAGE_MASK,
-					       (mas.last & PAGE_MASK) + PAGE_SIZE);
 					ret = walk_page_table_pte_range(
 						current->mm, mas.index & PAGE_MASK,
 						(mas.last & PAGE_MASK) + PAGE_SIZE,

@@ -225,8 +225,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		       folio_ref_count(orig_folio), paddr);
 		return ERR_PTR(-EINVAL);
 	}
-	printk("Copy on write\n");
-	sbpf_reverse_dump(folio->page.sbpf_reverse);
 
 	if (update_mappings) {
 #ifdef USE_MAPLE_TREE
@@ -323,7 +321,6 @@ set_pte:
 		return -EINVAL;
 	}
 
-	// sbpf_reverse_dump(folio->page.sbpf_reverse);
 	ret = sbpf_reverse_insert_range(folio->page.sbpf_reverse, vaddr, vaddr + len);
 	if (unlikely(ret)) {
 		printk("Error in insert reverse map 0x%lx (0x%lx) error %d\n", vaddr, len,
@@ -367,7 +364,7 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 	int ret;
 
 	if (start < 0x4000000000) {
-		// Temporary fix. Have to fix.
+		// TODO! Temporary fix.
 		paddr = folio->page.sbpf_reverse->paddr;
 		radix_tree_delete(&current->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 				  paddr);
@@ -410,6 +407,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	if (!folio || !folio->page.sbpf_reverse)
 		return 0;
 	if (folio_ref_count(folio) > 1) {
+		// TODO! Optimize, If the folio will be droped, we don't have to copy on write.
 		folio = sbpf_mem_copy_on_write(current->sbpf, folio, NULL, true);
 		if (IS_ERR_OR_NULL(folio)) {
 			printk("Error in copy on write on bpf_unmap_pte 0x%lx\n", addr);
@@ -452,11 +450,12 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	aux.tlb = &tlb;
 	aux.folio = NULL;
 
-	continue_walk = 0x100000000 <= address && address + len < 0x4000000000; // for madvise
+	// continue_walk = 0x100000000 <= address && address + len < 0x4000000000; // for madvise
+	continue_walk = true;
 	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux, continue_walk);
 
 	if (unlikely(ret)) {
-		printk("Error in bpf_unset_pte (addr : 0x%lx, len : 0x%lx)\n", address, len);
+		printk("Error in bpf_unset_pte (%d) (addr : 0x%lx, len : 0x%lx)\n", ret, address, len);
 		tlb_finish_mmu(&tlb);
 		return ret;
 	}
@@ -465,7 +464,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	if (aux.folio == NULL)
 		return 0;
 
-	ret = unset_trie_entry(aux.start_addr, aux.start_addr + len, aux.folio);
+	ret = unset_trie_entry(aux.start_addr, address + len, aux.folio);
 	if (unlikely(ret))
 		return ret;
 
