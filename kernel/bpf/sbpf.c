@@ -36,7 +36,6 @@ static int __handle_page_fault(pte_t *pte, unsigned long addr, void *aux)
 	struct sbpf_task *sbpf = aux;
 
 	if (!IS_ERR_OR_NULL(sbpf_mem_copy_on_write(sbpf, orig_folio, NULL, true))) {
-		inc_mm_counter(current->mm, MM_ANONPAGES);
 		return 0;
 	}
 
@@ -425,6 +424,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 				radix_tree_insert(
 					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 					iter.index, folio);
+				inc_mm_counter(tsk->mm, MM_ANONPAGES);
 				/* Copy the pte from the parent process and make the parent pte as an write protected. */
 #ifdef USE_MAPLE_TREE
 				mas_init(&mas, folio->page.sbpf_reverse->mt, 0);
@@ -435,7 +435,8 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					ret = walk_page_table_pte_range(
 						current->mm, mas.index & PAGE_MASK,
 						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_write_protected_current, &pgprot, false);
+						__set_write_protected_current, &pgprot,
+						false);
 
 					entry = mk_pte(&folio->page, pgprot);
 					entry = pte_sw_mkyoung(entry);
@@ -459,7 +460,8 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 						    list) {
 					ret = walk_page_table_pte_range(
 						current->mm, cur->start, cur->end,
-						__set_write_protected_current, &pgprot, false);
+						__set_write_protected_current, &pgprot,
+						false);
 
 					entry = mk_pte(&folio->page, pgprot);
 					entry = pte_sw_mkyoung(entry);

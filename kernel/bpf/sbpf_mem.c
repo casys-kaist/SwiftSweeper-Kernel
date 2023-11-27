@@ -213,6 +213,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
+
 		folio_put(orig_folio);
 	} else if (folio_ref_count(orig_folio) == 1) {
 		// Reuse the original folio, becuase it is not shared among process.
