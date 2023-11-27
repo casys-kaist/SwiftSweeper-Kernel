@@ -457,8 +457,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 #else
 				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
 						    list) {
-					printk("dup page start 0x%lx end 0x%lx\n",
-					       cur->start, cur->end);
 					ret = walk_page_table_pte_range(
 						current->mm, cur->start, cur->end,
 						__set_write_protected_current, &pgprot, false);
