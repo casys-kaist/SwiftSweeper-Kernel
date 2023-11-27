@@ -1,3 +1,4 @@
+#include <linux/maple_tree.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
 #include <linux/errno.h>
@@ -49,14 +50,12 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	struct sbpf_vm_fault sbpf_fault;
 	int ret;
 
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
 	if (flags & FAULT_FLAG_WRITE) {
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
-						__handle_page_fault, sbpf);
+						__handle_page_fault, sbpf, false);
 		if (!ret)
 			return 0;
 	}
-#endif
 
 	sbpf_fault.vaddr = fault_addr;
 	sbpf_fault.flags = flags;
@@ -378,11 +377,14 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	struct radix_tree_iter iter;
 	struct folio *folio;
 	void __rcu **slot;
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
-	struct sbpf_reverse_map_elem *cur;
 	int ret;
 	pgprot_t pgprot;
 	pte_t entry;
+#ifdef USE_MAPLE_TREE
+	struct sbpf_reverse_map *smap = NULL;
+	struct ma_state mas;
+#else
+	struct sbpf_reverse_map_elem *cur;
 #endif
 
 	if (current->sbpf == NULL) {
@@ -424,12 +426,40 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
 					iter.index, folio);
 				/* Copy the pte from the parent process and make the parent pte as an write protected. */
-#ifndef CONFIG_BPF_SBPF_DISABLE_REVERSE
+#ifdef USE_MAPLE_TREE
+				mas_init(&mas, folio->page.sbpf_reverse->mt, 0);
+				mas_for_each(&mas, smap, ULONG_MAX)
+				{
+					if (smap == NULL)
+						continue;
+					ret = walk_page_table_pte_range(
+						current->mm, mas.index & PAGE_MASK,
+						(mas.last & PAGE_MASK) + PAGE_SIZE,
+						__set_write_protected_current, &pgprot, false);
+
+					entry = mk_pte(&folio->page, pgprot);
+					entry = pte_sw_mkyoung(entry);
+					entry = pte_mkdirty(entry);
+					ret |= touch_page_table_pte_range(
+						tsk->mm, mas.index & PAGE_MASK,
+						(mas.last & PAGE_MASK) + PAGE_SIZE,
+						__set_write_protected_new_task, &entry);
+
+					if (unlikely(ret)) {
+						printk("PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx]\n",
+						       current->pid, tsk->pid, mas.index,
+						       mas.last);
+						sbpf_reverse_dump(
+							folio->page.sbpf_reverse);
+						return -EINVAL;
+					}
+				}
+#else
 				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
 						    list) {
 					ret = walk_page_table_pte_range(
 						current->mm, cur->start, cur->end,
-						__set_write_protected_current, &pgprot);
+						__set_write_protected_current, &pgprot, false);
 
 					entry = mk_pte(&folio->page, pgprot);
 					entry = pte_sw_mkyoung(entry);
@@ -439,10 +469,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 						__set_write_protected_new_task, &entry);
 
 					if (unlikely(ret)) {
-						trace_printk(
-							"PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
-							current->pid, tsk->pid,
-							cur->start, cur->end);
+						printk("PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
+						       current->pid, tsk->pid, cur->start,
+						       cur->end);
 						sbpf_reverse_dump(
 							folio->page.sbpf_reverse);
 						return -EINVAL;
