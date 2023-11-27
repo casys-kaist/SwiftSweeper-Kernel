@@ -7,7 +7,7 @@
 
 #define TRI_SIZE 512
 
-#define USE_MAPLE_TREE 1
+// #define USE_MAPLE_TREE 1
 
 /* struct sbpf_reverse_map: [start , end) */
 struct sbpf_reverse_map_elem {
