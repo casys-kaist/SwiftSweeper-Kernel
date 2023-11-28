@@ -62,7 +62,10 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	sbpf_fault.aux = current->sbpf->page_fault.aux;
 
 	// Call page fault function.
-	return current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
+	ret = current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
+	update_hiwater_rss(current->mm);
+
+	return ret;
 }
 
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
