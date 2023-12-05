@@ -30,7 +30,6 @@ struct sbpf_mm_struct {
 	struct list_head children;
 	struct list_head elem;
 	atomic_t refcnt;
-	struct radix_tree_root paddr_to_folio;
 };
 
 struct trie_node {
@@ -72,6 +71,5 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long addr, unsigned
 			      pte_func func, void *aux, bool continue_walk);
 int touch_page_table_pte_range(struct mm_struct *mm, unsigned long addr,
 			       unsigned long end, pte_func func, void *aux);
-struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio,
-				     void __rcu **slot, int update_mappings);
+struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio);
 #endif

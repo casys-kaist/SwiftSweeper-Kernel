@@ -1369,6 +1369,13 @@ unsigned long do_mmap(struct file *file, unsigned long addr, unsigned long len,
 		}
 	}
 
+	if (flags & MAP_MBPF) {
+		/* Currently, only MAP_PRIVATE with MAP_MBPF is supported */
+		if (!(flags & MAP_PRIVATE))
+			return -EINVAL;
+		vm_flags |= VM_MBPF;
+	}
+
 	/*
 	 * Set 'VM_NORESERVE' if we should not account for the
 	 * memory use of this mapping.
@@ -2560,7 +2567,7 @@ unsigned long mmap_region(struct file *file, unsigned long addr, unsigned long l
 	 */
 	if (accountable_mapping(file, vm_flags)) {
 		charged = len >> PAGE_SHIFT;
-		if (security_vm_enough_memory_mm(mm, charged))
+		if (!(vm_flags & VM_MBPF) && security_vm_enough_memory_mm(mm, charged))
 			return -ENOMEM;
 		vm_flags |= VM_ACCOUNT;
 	}

@@ -1008,6 +1008,14 @@ static int madvise_vma_behavior(struct vm_area_struct *vma,
 	struct anon_vma_name *anon_name;
 	unsigned long new_flags = vma->vm_flags;
 
+	/*
+	* Currently, MBPF is not supported for madvise.
+	* MBPF is a special case because it is not a normal vma.
+	* Instead, use bpf() syscall to directly modify the page table.
+	*/
+	if (vma->vm_flags & VM_MBPF)
+		return -EINVAL;
+
 	switch (behavior) {
 	case MADV_REMOVE:
 		return madvise_remove(vma, prev, start, end);

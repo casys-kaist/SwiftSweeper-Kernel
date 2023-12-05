@@ -282,6 +282,9 @@ extern unsigned int kobjsize(const void *objp);
 #define VM_UFFD_MISSING	0
 #endif /* CONFIG_MMU */
 #define VM_PFNMAP	0x00000400	/* Page-ranges managed without "struct page", just pure PFN */
+#ifdef CONFIG_BPF_SBPF
+#define VM_MBPF 	   0x00000800      /* BPF map backed by memblock */
+#endif
 #define VM_UFFD_WP	0x00001000	/* wrprotect pages tracking */
 
 #define VM_LOCKED	0x00002000

@@ -34,15 +34,20 @@ static int __handle_page_fault(pte_t *pte, unsigned long addr, void *aux)
 {
 	struct folio *orig_folio = page_folio(pte_page(*pte));
 	struct sbpf_task *sbpf = aux;
+	void *ret;
 
-	if (!IS_ERR_OR_NULL(sbpf_mem_copy_on_write(sbpf, orig_folio, NULL, true))) {
-		return 0;
+	ret = sbpf_mem_copy_on_write(sbpf, orig_folio);
+	if (IS_ERR_OR_NULL(ret)) {
+		printk("mbpf: copy on write failed (%ld) on __handle_page_fault 0x%lx\n",
+		       PTR_ERR(ret), addr);
+		return -EINVAL;
 	}
 
-	return -EINVAL;
+	return 0;
 }
 
 int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
+
 			   unsigned int flags)
 {
 	unsigned long vaddr = fault_addr & PAGE_MASK;
@@ -246,7 +251,6 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
 	sbpf->page_fault.sbpf_mm->parent = NULL;
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
-	INIT_RADIX_TREE(&sbpf->page_fault.sbpf_mm->paddr_to_folio, GFP_ATOMIC);
 	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
 
 	return 0;
@@ -303,22 +307,8 @@ out_sbpf:
 static void release_sbpf_mm_struct(struct task_struct *tsk,
 				   struct sbpf_mm_struct *sbpf_mm)
 {
-	struct radix_tree_iter iter;
-	void __rcu **slot;
-	struct folio *folio;
-
 	if (sbpf_mm == NULL || !atomic_dec_and_test(&sbpf_mm->refcnt))
 		return;
-
-	radix_tree_for_each_slot(slot, &sbpf_mm->paddr_to_folio, &iter, 0) {
-		folio = rcu_dereference_protected(*slot, true);
-		if (folio_ref_count(folio) > 0) {
-			atomic_set(&folio->_mapcount, -1);
-			folio_put(folio);
-			dec_mm_counter(tsk->mm, MM_ANONPAGES);
-		}
-		radix_tree_iter_delete(&sbpf_mm->paddr_to_folio, &iter, slot);
-	}
 
 	kfree(sbpf_mm);
 }
@@ -326,7 +316,6 @@ static void release_sbpf_mm_struct(struct task_struct *tsk,
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 {
 	struct sbpf_alloc_kmem *alloc_kmem;
-	struct mmu_gather tlb;
 	struct radix_tree_iter iter;
 	void __rcu **slot;
 
@@ -337,11 +326,6 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			kfree(alloc_kmem);
 			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter, slot);
 		}
-
-		tlb_gather_mmu(&tlb, tsk->mm);
-		free_pgd_range(&tlb, SBPF_USER_VADDR_START, sbpf->max_alloc_end,
-			       SBPF_USER_VADDR_START, sbpf->max_alloc_end + (1UL << 39));
-		tlb_finish_mmu(&tlb);
 
 		if (sbpf->sbpf_func.prog) {
 			bpf_prog_put(sbpf->sbpf_func.prog);
@@ -357,17 +341,16 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 	}
 }
 
-static int __set_write_protected_current(pte_t *pte, unsigned long addr, void *aux)
+int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+		   pte_t *dst_pte, pte_t *src_pte, unsigned long addr, int *rss,
+		   struct folio *folio)
 {
-	ptep_set_wrprotect(current->mm, addr, pte);
-	*(pgprot_t *)aux = pte_pgprot(*pte);
-	return 0;
-}
+	if (!folio || folio->page.sbpf_reverse == NULL)
+		return -EINVAL;
 
-static int __set_write_protected_new_task(pte_t *pte, unsigned long addr, void *aux)
-{
-	pte_t entry = *(pte_t *)aux;
-	set_pte(pte, entry);
+	folio_get(folio);
+	rss[MM_ANONPAGES]++;
+
 	return 0;
 }
 
@@ -377,17 +360,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct sbpf_task *old_sbpf;
 	struct radix_tree_iter iter;
-	struct folio *folio;
 	void __rcu **slot;
-	int ret;
-	pgprot_t pgprot;
-	pte_t entry;
-#ifdef USE_MAPLE_TREE
-	struct sbpf_reverse_map *smap = NULL;
-	struct ma_state mas;
-#else
-	struct sbpf_reverse_map_elem *cur;
-#endif
 
 	if (current->sbpf == NULL) {
 		tsk->sbpf = NULL;
@@ -412,78 +385,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 				old_sbpf->page_fault.sbpf_mm;
 			list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
 				 &old_sbpf->page_fault.sbpf_mm->children);
-
-			/* Copy the folio from the parent process and increase the folio reference count. */
-			radix_tree_for_each_slot(
-				slot, &old_sbpf->page_fault.sbpf_mm->paddr_to_folio,
-				&iter, 0) {
-				folio = rcu_dereference_protected(*slot, true);
-				if (folio_ref_count(folio) <= 0) {
-					printk("Error in folio ref cnt:%d addr:0x%lx",
-					       folio_ref_count(folio), iter.index);
-					return -EINVAL;
-				}
-				folio_get(folio);
-				radix_tree_insert(
-					&tsk->sbpf->page_fault.sbpf_mm->paddr_to_folio,
-					iter.index, folio);
-				inc_mm_counter(tsk->mm, MM_ANONPAGES);
-				/* Copy the pte from the parent process and make the parent pte as an write protected. */
-#ifdef USE_MAPLE_TREE
-				mas_init(&mas, folio->page.sbpf_reverse->mt, 0);
-				mas_for_each(&mas, smap, ULONG_MAX)
-				{
-					if (smap == NULL)
-						continue;
-					ret = walk_page_table_pte_range(
-						current->mm, mas.index & PAGE_MASK,
-						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_write_protected_current, &pgprot,
-						false);
-
-					entry = mk_pte(&folio->page, pgprot);
-					entry = pte_sw_mkyoung(entry);
-					entry = pte_mkdirty(entry);
-					ret |= touch_page_table_pte_range(
-						tsk->mm, mas.index & PAGE_MASK,
-						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_write_protected_new_task, &entry);
-
-					if (unlikely(ret)) {
-						printk("PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx]\n",
-						       current->pid, tsk->pid, mas.index,
-						       mas.last);
-						sbpf_reverse_dump(
-							folio->page.sbpf_reverse);
-						return -EINVAL;
-					}
-				}
-#else
-				list_for_each_entry(cur, &folio->page.sbpf_reverse->elem,
-						    list) {
-					ret = walk_page_table_pte_range(
-						current->mm, cur->start, cur->end,
-						__set_write_protected_current, &pgprot,
-						false);
-
-					entry = mk_pte(&folio->page, pgprot);
-					entry = pte_sw_mkyoung(entry);
-					entry = pte_mkdirty(entry);
-					ret |= touch_page_table_pte_range(
-						tsk->mm, cur->start, cur->end,
-						__set_write_protected_new_task, &entry);
-
-					if (unlikely(ret)) {
-						printk("PID %d CHILD %d Error in walk page table [0x%lx, 0x%lx)\n",
-						       current->pid, tsk->pid, cur->start,
-						       cur->end);
-						sbpf_reverse_dump(
-							folio->page.sbpf_reverse);
-						return -EINVAL;
-					}
-				}
-#endif
-			}
 		}
 	}
 
@@ -493,7 +394,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	INIT_RADIX_TREE(&tsk->sbpf->user_shared_pages, GFP_ATOMIC);
-	tsk->sbpf->max_alloc_end = current->sbpf->max_alloc_end;
 	atomic_inc(&current->sbpf->ref);
 
 	// We have to clean up user shared pages in case of fork.
@@ -533,7 +433,6 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 		return -ENOMEM;
 
 	INIT_RADIX_TREE(&current->sbpf->user_shared_pages, GFP_ATOMIC);
-	current->sbpf->max_alloc_end = SBPF_USER_VADDR_START;
 
 	return 0;
 }

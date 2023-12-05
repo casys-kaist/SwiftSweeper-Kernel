@@ -77,6 +77,7 @@
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
+#include <linux/sbpf.h>
 
 #include <trace/events/kmem.h>
 
@@ -927,6 +928,7 @@ copy_present_pte(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 	struct folio *folio;
 
 	page = vm_normal_page(src_vma, addr, pte);
+
 	if (page)
 		folio = page_folio(page);
 	if (page && folio_test_anon(folio)) {
@@ -944,6 +946,8 @@ copy_present_pte(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 						 addr, rss, prealloc, page);
 		}
 		rss[MM_ANONPAGES]++;
+	} else if (page && src_vma->vm_flags & VM_MBPF) {
+		copy_sbpf_page(dst_vma, src_vma, dst_pte, src_pte, addr, rss, folio);
 	} else if (page) {
 		folio_get(folio);
 		page_dup_file_rmap(page, false);
@@ -1236,6 +1240,9 @@ vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 		return true;
 
 	if (src_vma->anon_vma)
+		return true;
+
+	if (src_vma->vm_flags & VM_MBPF)
 		return true;
 
 	/*
@@ -5237,10 +5244,24 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 
 	lru_gen_enter_fault(vma);
 
-	if (unlikely(is_vm_hugetlb_page(vma)))
-		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
-	else
-		ret = __handle_mm_fault(vma, address, flags);
+	if (vma->vm_flags & VM_MBPF) {
+#ifdef CONFIG_BPF_SBPF
+		if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
+			ret = sbpf_handle_page_fault(current->sbpf, address, flags);
+			if (ret)
+				ret = VM_FAULT_SIGSEGV;
+		} else {
+			ret = VM_FAULT_SIGSEGV;
+		}
+#else
+		ret = -EINVAL;
+#endif
+	} else {
+		if (unlikely(is_vm_hugetlb_page(vma)))
+			ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
+		else
+			ret = __handle_mm_fault(vma, address, flags);
+	}
 
 	lru_gen_exit_fault();
 

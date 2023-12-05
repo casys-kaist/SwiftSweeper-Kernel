@@ -706,7 +706,8 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
-			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
+			if (!(mpnt->vm_flags & VM_MBPF) &&
+			 	security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
 			charge = len;
 		}
