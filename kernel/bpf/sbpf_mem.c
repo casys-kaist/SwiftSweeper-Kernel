@@ -245,7 +245,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 						__set_pte, &entry, false);
 		if (unlikely(ret)) {
 			printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n", ret,
-			       mas.index, mas.last);
+			       s mas.index, mas.last);
 		}
 	}
 #else
@@ -259,7 +259,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 	}
 #endif
-	folio_put(folio);
+	folio_put_refs(orig_folio, folio_ref_count(folio));
 
 	return folio;
 }
@@ -387,14 +387,11 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 		BUG_ON(folio_ref_count(folio) != 0);
 		paddr = folio->page.sbpf_reverse->paddr;
 		atomic_set(&folio->_mapcount, -1);
-		folio_put(folio);
 		sbpf_reverse_delete(folio->page.sbpf_reverse);
 		folio->page.sbpf_reverse = NULL;
 		dec_mm_counter(current->mm, MM_ANONPAGES);
 		return 0;
 	}
-
-	folio_put(folio);
 
 	return 0;
 }
@@ -422,6 +419,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	ptep_get_and_clear(current->mm, addr, pte);
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);
+	folio_put(folio);
 
 	if (aux->folio == NULL) {
 		aux->folio = folio;
