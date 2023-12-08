@@ -424,16 +424,31 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	if (aux->folio == NULL) {
 		aux->folio = folio;
 		aux->start_addr = addr;
+		aux->end_addr = addr + PAGE_SIZE;
 		return 0;
 	}
 
 	if (aux->folio != folio) {
-		ret = unset_trie_entry(aux->start_addr, addr, aux->folio);
+		ret = unset_trie_entry(aux->start_addr, aux->end_addr, aux->folio);
 		if (unlikely(ret))
 			return ret;
 
 		aux->folio = folio;
 		aux->start_addr = addr;
+		aux->end_addr = addr + PAGE_SIZE;
+	} else {
+		if (likely(aux->end_addr == addr)) {
+			aux->end_addr += PAGE_SIZE;
+		} else { // aliases : [mapped to canon(folio) x | unmmaped ... | mapped to canon(folio) x]
+			ret = unset_trie_entry(aux->start_addr, aux->end_addr,
+					       aux->folio);
+			if (unlikely(ret))
+				return ret;
+
+			// aux->folio = folio;
+			aux->start_addr = addr;
+			aux->end_addr = addr + PAGE_SIZE;
+		}
 	}
 
 	if (aux->folio != NULL && addr == aux->end_addr - PAGE_SIZE) {
@@ -451,7 +466,6 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	struct mmu_gather tlb;
 	struct unset_pte_aux aux;
 	int ret;
-	bool continue_walk;
 
 	tlb_gather_mmu(&tlb, mm);
 
@@ -459,11 +473,9 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	aux.tlb = &tlb;
 	aux.folio = NULL;
 
-	// continue_walk = 0x100000000 <= address && address + len < 0x4000000000; // for madvise
-	continue_walk = true;
 	aux.end_addr = address + len;
 	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux,
-					continue_walk);
+					true);
 
 	if (unlikely(ret)) {
 		printk("mbpf: bpf_unset_pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",

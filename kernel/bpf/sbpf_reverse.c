@@ -87,12 +87,13 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 }
 
 #else
-struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long addr)
+static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long start,
+								  unsigned long end)
 {
 	struct sbpf_reverse_map_elem *map_elem =
 		kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
-	map_elem->start = addr;
-	map_elem->end = addr + PAGE_SIZE;
+	map_elem->start = start;
+	map_elem->end = end;
 	INIT_LIST_HEAD(&map_elem->list);
 	return map_elem;
 }
@@ -102,80 +103,10 @@ void *sbpf_reverse_init(unsigned long paddr)
 	struct sbpf_reverse_map *map =
 		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
 	INIT_LIST_HEAD(&map->elem);
+	map->cached_elem = NULL;
 	map->paddr = paddr;
 
 	return map;
-}
-
-static inline int __sbpf_reverse_insert(struct sbpf_reverse_map_elem *map_elem,
-					unsigned long addr)
-{
-	if (addr + PAGE_SIZE == map_elem->start) {
-		map_elem->start = addr;
-		return 0;
-	} else if (addr == map_elem->end) {
-		map_elem->end = addr + PAGE_SIZE;
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-static inline int __sbpf_reverse_insert_range(struct sbpf_reverse_map_elem *map_elem,
-					      unsigned long start, unsigned long end)
-{
-	if (start + (end - start) == map_elem->start) {
-		map_elem->start = start;
-		return 0;
-	} else if (start == map_elem->end) {
-		map_elem->end = end;
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-static inline int
-__sbpf_reverse_insert_range_reverse(struct sbpf_reverse_map_elem *map_elem,
-				    unsigned long start, unsigned long end)
-{
-	if (start + (end - start) == map_elem->end) {
-		map_elem->end = end;
-		return 0;
-	} else if (start == map_elem->start) {
-		map_elem->start = start;
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr)
-{
-	struct sbpf_reverse_map_elem *cur = NULL;
-	struct sbpf_reverse_map_elem *next = NULL;
-
-	if (map == NULL)
-		return -EINVAL;
-
-	list_for_each_entry(cur, &map->elem, list) {
-		next = list_next_entry(cur, list);
-		// Merge
-		if (next != NULL && cur->end == addr &&
-		    cur->end + PAGE_SIZE == next->start) {
-			cur->end = next->end;
-			list_del(&next->list);
-			kfree(next);
-			return 0;
-		}
-		if (!__sbpf_reverse_insert(cur, addr))
-			return 0;
-	}
-
-	next = init_reverse_map_elem(addr);
-	list_add(&next->list, &map->elem);
-
-	return 0;
 }
 
 int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
@@ -183,128 +114,129 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
 	struct sbpf_reverse_map_elem *prev = NULL;
-	size_t len = end - start;
 
 	if (map == NULL)
 		return -EINVAL;
-
-	// list_for_each_entry_reverse(cur, &map->elem, list) {
-	// 	prev = list_prev_entry(cur, list);
-	// 	// Merge
-	// 	if (prev != NULL && cur->start == end && cur->start - len == prev->end) {
-	// 		cur->start = prev->start;
-	// 		list_del(&prev->list);
-	// 		kfree(prev);
-	// 		return 0;
-	// 	}
-	// 	if (!__sbpf_reverse_insert_range_reverse(cur, start, end))
-	// 		return 0;
-	// }
-
-	// cur = init_reverse_map_elem(start);
-	// cur->end = end;
-	// list_add(&cur->list, &map->elem);
-
-	while (start < end) {
-		if (sbpf_reverse_insert(map, start))
+	map->cached_elem = NULL; // Only enables cache when burst frees are processed
+	list_for_each_entry_reverse(cur, &map->elem, list) {
+		// cur || new node
+		if (cur->end < start) {
+			list_add(&init_reverse_map_elem(start, end)->list, &cur->list);
 			return 0;
-		start += PAGE_SIZE;
-	}
-
-	return 0;
-}
-
-int __sbpf_reverse_remove(struct sbpf_reverse_map_elem *map_elem, unsigned long addr)
-{
-	struct sbpf_reverse_map_elem *new_elem;
-	if (addr == map_elem->start) {
-		map_elem->start = addr + PAGE_SIZE;
-		return 0;
-	} else if (addr + PAGE_SIZE == map_elem->end) {
-		map_elem->end = addr;
-		return 0;
-	} else if (addr > map_elem->start && addr + PAGE_SIZE < map_elem->end) {
-		new_elem = init_reverse_map_elem(addr + PAGE_SIZE);
-		new_elem->end = map_elem->end;
-		map_elem->end = addr;
-		list_add(&new_elem->list, &map_elem->list);
-		return 0;
-	}
-
-	return -EINVAL;
-}
-
-int sbpf_reverse_remove(struct sbpf_reverse_map *map, unsigned long addr)
-{
-	struct sbpf_reverse_map_elem *cur = NULL;
-
-	if (map == NULL)
-		return -EINVAL;
-
-	list_for_each_entry(cur, &map->elem, list) {
-		__sbpf_reverse_remove(cur, addr);
-		if (cur->start == cur->end) {
-			list_del(&cur->list);
-			kfree(cur);
+		}
+		// [cur - new node]
+		if (cur->end == start) { // Forward merge
+			cur->end = end;
+			return 0; // Backward merge was considered by previous cur
+		}
+		// [new node - cur]
+		if (cur->start == end) { // Backward merge
+			cur->start = start;
+			prev = list_prev_entry(cur, list);
+			// [prev - new node - cur]
+			if (prev != NULL && prev->end == cur->start) {
+				prev->end = cur->end;
+				list_del(&cur->list);
+				kfree(cur);
+			}
 			return 0;
 		}
 	}
-
-	return -ENOENT;
+	// new node is the smallest range
+	list_add(&init_reverse_map_elem(start, end)->list, &map->elem);
+	return 0;
 }
 
 int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 			      uint64_t end)
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
-	uint64_t addr = start;
-	// struct sbpf_reverse_map_elem *temp = NULL;
-	// struct sbpf_reverse_map_elem *new_elem = NULL;
 
 	if (map == NULL)
 		return -EINVAL;
+	if (map->cached_elem) {
+		cur = list_entry(map->cached_elem, struct sbpf_reverse_map_elem, list);
 
-	while (addr < end) {
-		list_for_each_entry(cur, &map->elem, list) {
-			__sbpf_reverse_remove(cur, addr);
-			if (cur->start == cur->end) {
-				list_del(&cur->list);
-				kfree(cur);
-				break;
+		if (cur->start <=
+		    start) { // deleted node is right after cur or within cur
+			list_for_each_entry_from(cur, &map->elem, list) {
+				// guaranteed to be within one node
+				if (cur->start <= start && end <= cur->end) {
+					if (cur->start == start) {
+						if (cur->end == end) {
+							if (!list_is_last(&cur->list,
+									  &map->elem)) {
+								map->cached_elem =
+									cur->list.next;
+							} else if (!list_is_first(
+									   &cur->list,
+									   &map->elem)) {
+								map->cached_elem =
+									cur->list.prev;
+							}
+							list_del(&cur->list);
+							kfree(cur);
+						} else { // end < cur->end
+							cur->start = end;
+							map->cached_elem = &cur->list;
+						}
+					} else { // cur->start < start
+						if (end < cur->end) {
+							list_add(&init_reverse_map_elem(
+									  end, cur->end)
+									  ->list,
+								 &cur->list);
+						}
+						cur->end = start;
+						map->cached_elem = &cur->list;
+					}
+					return 0;
+				}
 			}
+			return -EINVAL;
+		} else { // deleted node is before cur
+			if (unlikely(cur->start <= end)) {
+				printk("Expectaion false! in remove_rnage");
+				return -EINVAL;
+			}
+			// Since it is checked, move the cursor
+			cur = list_prev_entry(cur, list);
 		}
-		addr += PAGE_SIZE;
+	} else {
+		cur = list_last_entry(&map->elem, struct sbpf_reverse_map_elem, list);
 	}
 
-	return 0;
-
-	// list_for_each_entry_safe(cur, temp, &map->elem, list) {
-	// 	if (cur->start >= end) {
-	// 		break;
-	// 	}
-
-	// 	if (cur->start < start) {
-	// 		if (cur->end <= start) {
-	// 			continue;
-	// 		} else if (cur->end <= end) {
-	// 			cur->end = start;
-	// 		} else {
-	// 			new_elem = init_reverse_map_elem(end);
-	// 			new_elem->end = cur->end;
-	// 			cur->end = start;
-	// 			list_add(&new_elem->list, &cur->list);
-	// 		}
-	// 	} else if (cur->start >= start) {
-	// 		if (cur->end <= end) {
-	// 			list_del(&cur->list);
-	// 			kfree(cur);
-	// 		} else {
-	// 			cur->start = end;
-	// 		}
-	// 	}
-	// }
-
-	return 0;
+	// list_for_each_entry(cur, &map->elem, list) {
+	list_for_each_entry_from_reverse(cur, &map->elem, list) { // For diffmail
+		// guaranteed to be within one node
+		if (cur->start <= start && end <= cur->end) {
+			if (cur->start == start) {
+				if (cur->end == end) {
+					if (!list_is_last(&cur->list, &map->elem)) {
+						map->cached_elem = cur->list.next;
+					} else if (!list_is_first(&cur->list,
+								  &map->elem)) {
+						map->cached_elem = cur->list.prev;
+					}
+					list_del(&cur->list);
+					kfree(cur);
+				} else { // end < cur->end
+					cur->start = end;
+					map->cached_elem = &cur->list;
+				}
+			} else { // cur->start < start
+				if (end < cur->end) {
+					list_add(&init_reverse_map_elem(end, cur->end)
+							  ->list,
+						 &cur->list);
+				}
+				cur->end = start;
+				map->cached_elem = &cur->list;
+			}
+			return 0;
+		}
+	}
+	return -EINVAL;
 }
 
 int sbpf_reverse_empty(struct sbpf_reverse_map *map)

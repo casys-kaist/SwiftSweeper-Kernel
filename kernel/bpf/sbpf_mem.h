@@ -22,6 +22,7 @@ struct sbpf_reverse_map {
 	struct maple_tree *mt;
 #else
 	struct list_head elem;
+	struct list_head *cached_elem;
 #endif
 };
 
