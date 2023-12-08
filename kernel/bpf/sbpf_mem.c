@@ -1,3 +1,4 @@
+#include "linux/page_ref.h"
 #include <linux/compiler.h>
 #include <linux/gfp.h>
 #include <linux/gfp_types.h>
@@ -170,11 +171,11 @@ static int __get_wp_pte(pte_t *pte, unsigned long addr, void *aux)
 	pte_t entry;
 
 	folio = page_folio(pte_page(*pte));
-	if (folio != NULL && !(pte_flags(*pte) & _PAGE_RW)) {
-		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
-	}
-
 	if (!IS_ERR_OR_NULL(folio)) {
+		if (!(pte_flags(*pte) & _PAGE_RW)) {
+			folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+		}
+
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
@@ -193,6 +194,7 @@ static int __set_pte(pte_t *pte, unsigned long addr, void *aux)
 
 	pte_t entry = *(pte_t *)aux;
 	folio = page_folio(pte_page(entry));
+	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
 
@@ -259,7 +261,13 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 	}
 #endif
+	folio_put(folio);
+	atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
 	folio_put_refs(orig_folio, folio_ref_count(folio));
+
+	// Fix this!
+	// Also, we have to fix the copy on write logic to remove the dupulicated copy.
+	flush_tlb_all();
 
 	return folio;
 }
@@ -386,7 +394,6 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
 		BUG_ON(folio_ref_count(folio) != 0);
 		paddr = folio->page.sbpf_reverse->paddr;
-		atomic_set(&folio->_mapcount, -1);
 		sbpf_reverse_delete(folio->page.sbpf_reverse);
 		folio->page.sbpf_reverse = NULL;
 		dec_mm_counter(current->mm, MM_ANONPAGES);
@@ -419,6 +426,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	ptep_get_and_clear(current->mm, addr, pte);
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);
+	atomic_dec(&folio->_mapcount);
 	folio_put(folio);
 
 	if (aux->folio == NULL) {
@@ -451,12 +459,6 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 		}
 	}
 
-	if (aux->folio != NULL && addr == aux->end_addr - PAGE_SIZE) {
-		ret = unset_trie_entry(aux->start_addr, addr + PAGE_SIZE, aux->folio);
-		if (unlikely(ret))
-			return ret;
-	}
-
 	return 0;
 }
 
@@ -465,7 +467,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	struct mm_struct *mm = current->mm;
 	struct mmu_gather tlb;
 	struct unset_pte_aux aux;
-	int ret;
+	int ret = 0;
 
 	tlb_gather_mmu(&tlb, mm);
 
@@ -476,16 +478,20 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	aux.end_addr = address + len;
 	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux,
 					true);
+	if (aux.folio && likely(!ret)) {
+		ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
+	}
 
 	if (unlikely(ret)) {
 		printk("mbpf: bpf_unset_pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
 		       ret, address, len);
-		tlb_finish_mmu(&tlb);
-		return ret;
+		goto out;
 	}
+
+out:
 	tlb_finish_mmu(&tlb);
 
-	return 0;
+	return ret;
 }
 
 static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_flags,

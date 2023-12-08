@@ -157,8 +157,8 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 	if (map->cached_elem) {
 		cur = list_entry(map->cached_elem, struct sbpf_reverse_map_elem, list);
 
-		if (cur->start <=
-		    start) { // deleted node is right after cur or within cur
+		if (cur->start <= start) {
+			// deleted node is right after cur or within cur
 			list_for_each_entry_from(cur, &map->elem, list) {
 				// guaranteed to be within one node
 				if (cur->start <= start && end <= cur->end) {
@@ -194,9 +194,10 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 				}
 			}
 			return -EINVAL;
-		} else { // deleted node is before cur
+		} else {
+			// deleted node is before cur
 			if (unlikely(cur->start <= end)) {
-				printk("Expectaion false! in remove_rnage");
+				printk("mbpf: assertion failed in remove_range");
 				return -EINVAL;
 			}
 			// Since it is checked, move the cursor
@@ -207,7 +208,7 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 	}
 
 	// list_for_each_entry(cur, &map->elem, list) {
-	list_for_each_entry_from_reverse(cur, &map->elem, list) { // For diffmail
+	list_for_each_entry_from_reverse(cur, &map->elem, list) {
 		// guaranteed to be within one node
 		if (cur->start <= start && end <= cur->end) {
 			if (cur->start == start) {
