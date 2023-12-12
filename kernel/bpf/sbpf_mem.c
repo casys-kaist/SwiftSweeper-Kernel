@@ -1,4 +1,3 @@
-#include "linux/page_ref.h"
 #include <linux/compiler.h>
 #include <linux/gfp.h>
 #include <linux/gfp_types.h>
@@ -188,15 +187,23 @@ static int __get_wp_pte(pte_t *pte, unsigned long addr, void *aux)
 	return 0;
 }
 
-static int __set_pte(pte_t *pte, unsigned long addr, void *aux)
+struct set_pte_aux {
+	struct mmu_gather *tlb;
+	pte_t *entry;
+};
+
+static int __set_pte(pte_t *pte, unsigned long addr, void *aux_)
 {
 	struct folio *folio;
+	struct set_pte_aux *aux = aux_;
 
-	pte_t entry = *(pte_t *)aux;
+	pte_t entry = *(aux->entry);
 	folio = page_folio(pte_page(entry));
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
+	if (aux->tlb != NULL)
+		tlb_remove_tlb_entry(aux->tlb, pte, addr);
 
 	return 0;
 }
@@ -205,8 +212,11 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 {
 	unsigned long paddr;
 	struct folio *folio;
+	size_t cnt = 0;
 	int ret;
 	pte_t entry;
+	struct set_pte_aux aux;
+	struct mmu_gather tlb;
 #ifdef USE_MAPLE_TREE
 	struct sbpf_reverse_map *smap;
 	MA_STATE(mas, NULL, 0, 0);
@@ -223,19 +233,33 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 	// When the page is shared, we have to copy the page (folio).
 	// We have to make the parent page as a read only.
-	folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
-	if (unlikely(!folio))
-		return ERR_PTR(-ENOMEM);
-	if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
-		return ERR_PTR(-ENOMEM);
+	if ((unsigned long)orig_folio->mapping == PAGE_SBPF_SHARED) {
+		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+		if (unlikely(!folio))
+			return ERR_PTR(-ENOMEM);
+		if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
+			return ERR_PTR(-ENOMEM);
 
-	folio_copy(folio, orig_folio);
-	folio->page.sbpf_reverse = sbpf_reverse_dup(orig_folio->page.sbpf_reverse);
+		folio_copy(folio, orig_folio);
+		folio->page.sbpf_reverse =
+			sbpf_reverse_dup(orig_folio->page.sbpf_reverse);
 
-	entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
-	entry = pte_sw_mkyoung(entry);
-	entry = pte_mkwrite(entry);
+		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
+		entry = pte_sw_mkyoung(entry);
+		entry = pte_mkwrite(entry);
 
+		tlb_gather_mmu(&tlb, current->mm);
+		aux.tlb = &tlb;
+	} else {
+		folio = orig_folio;
+		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
+		entry = pte_sw_mkyoung(entry);
+		entry = pte_mkwrite(entry);
+
+		aux.tlb = NULL;
+	}
+
+	aux.entry = &entry;
 #ifdef USE_MAPLE_TREE
 	mas.tree = folio->page.sbpf_reverse->mt;
 	mas_for_each(&mas, smap, ULONG_MAX)
@@ -252,8 +276,9 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	}
 #else
 	list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+		cnt += (cur->end - cur->start) / PAGE_SIZE;
 		ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-						__set_pte, &entry, false);
+						__set_pte, &aux, false);
 		if (unlikely(ret)) {
 			printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n", ret,
 			       cur->start, cur->end);
@@ -261,13 +286,16 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 	}
 #endif
-	folio_put(folio);
-	atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
-	folio_put_refs(orig_folio, folio_ref_count(folio));
+	if ((unsigned long)orig_folio->mapping == PAGE_SBPF_SHARED) {
+		folio_put(folio);
+		atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
+		folio_put_refs(orig_folio, folio_ref_count(folio));
+		if (folio_ref_count(orig_folio) == cnt) {
+			orig_folio->mapping = (void *)PAGE_SBPF_PRIVATE;
+		}
 
-	// Fix this!
-	// Also, we have to fix the copy on write logic to remove the dupulicated copy.
-	flush_tlb_all();
+		tlb_finish_mmu(&tlb);
+	}
 
 	return folio;
 }
@@ -280,6 +308,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	struct folio *folio = NULL;
 	int ret;
 	int new_folio = 0;
+	struct set_pte_aux aux;
 	pte_t entry;
 	pgprot_t pgprot;
 	pgprot.pgprot = prot;
@@ -305,6 +334,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		if (likely(ret == -ENOENT)) {
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
+			folio->mapping = (void *)PAGE_SBPF_PRIVATE;
 			if (unlikely(!folio))
 				return -ENOMEM;
 			if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
@@ -315,18 +345,19 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 			entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
+			aux.entry = &entry;
+			aux.tlb = NULL;
 
 			if (paddr != vaddr) {
 				ret = touch_page_table_pte_range(current->mm, paddr,
 								 paddr + PAGE_SIZE,
-								 __set_pte, &entry);
+								 __set_pte, &aux);
 				ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse,
 								 paddr,
 								 paddr + PAGE_SIZE);
 			} else {
-				ret = touch_page_table_pte_range(current->mm, paddr,
-								 paddr + len, __set_pte,
-								 &entry);
+				ret = touch_page_table_pte_range(
+					current->mm, paddr, paddr + len, __set_pte, &aux);
 				ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse,
 								 paddr, paddr + len);
 			}
@@ -344,6 +375,9 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		}
 	} else {
 		folio = page_folio(pte_page(entry));
+		aux.entry = &entry;
+		aux.tlb = NULL;
+
 		if (unlikely(folio->page.sbpf_reverse == NULL)) {
 			printk("mbpf: invalid remapping request without BPF_MBPF mmap flags 0x%lx\n",
 			       paddr);
@@ -353,7 +387,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 
 	if (paddr != vaddr) {
 		ret = touch_page_table_pte_range(current->mm, vaddr, vaddr + len,
-						 __set_pte, &entry);
+						 __set_pte, &aux);
 		ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse, vaddr,
 						 vaddr + len);
 		if (unlikely(ret)) {

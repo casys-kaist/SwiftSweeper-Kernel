@@ -349,6 +349,7 @@ int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vm
 		return -EINVAL;
 
 	folio_get(folio);
+	folio->mapping = (void *)PAGE_SBPF_SHARED;
 	atomic_inc(&folio->_mapcount);
 	rss[MM_ANONPAGES]++;
 
