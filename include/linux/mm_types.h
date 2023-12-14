@@ -103,14 +103,7 @@ struct page {
 				struct list_head pcp_list;
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
-#ifdef CONFIG_BPF_SBPF
-			union {
-				struct sbpf_reverse_map *sbpf_reverse;
-				struct address_space *mapping;
-			};
-#else
 			struct address_space *mapping;
-#endif
 			union {
 				pgoff_t index;		/* Our offset within mapping. */
 				unsigned long share;	/* share count for fsdax */
@@ -203,6 +196,10 @@ struct page {
 
 #ifdef CONFIG_MEMCG
 	unsigned long memcg_data;
+#endif
+
+#ifdef CONFIG_BPF_SBPF
+	struct sbpf_reverse_map *sbpf_reverse;
 #endif
 
 	/*
