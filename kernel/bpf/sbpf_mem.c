@@ -233,7 +233,8 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 	// When the page is shared, we have to copy the page (folio).
 	// We have to make the parent page as a read only.
-	if ((unsigned long)orig_folio->private == PAGE_SBPF_SHARED) {
+	if ((unsigned long)orig_folio->page.sbpf_reverse->size !=
+	    folio_ref_count(orig_folio)) {
 		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 		if (unlikely(!folio))
 			return ERR_PTR(-ENOMEM);
@@ -286,13 +287,10 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 	}
 #endif
-	if ((unsigned long)orig_folio->private == PAGE_SBPF_SHARED) {
+	if (folio != orig_folio) {
 		folio_put(folio);
 		atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
 		folio_put_refs(orig_folio, folio_ref_count(folio));
-		if (folio_ref_count(orig_folio) == cnt) {
-			orig_folio->private = (void *)PAGE_SBPF_PRIVATE;
-		}
 
 		tlb_finish_mmu(&tlb);
 	}
@@ -334,7 +332,6 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		if (likely(ret == -ENOENT)) {
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
 			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
-			folio->private = (void *)PAGE_SBPF_PRIVATE;
 			if (unlikely(!folio))
 				return -ENOMEM;
 			if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))

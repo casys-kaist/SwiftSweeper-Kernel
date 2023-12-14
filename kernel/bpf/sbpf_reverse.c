@@ -105,6 +105,7 @@ void *sbpf_reverse_init(unsigned long paddr)
 	INIT_LIST_HEAD(&map->elem);
 	map->cached_elem = NULL;
 	map->paddr = paddr;
+	map->size = 0;
 
 	return map;
 }
@@ -117,7 +118,10 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 
 	if (map == NULL)
 		return -EINVAL;
+
+	map->size += (end - start) / PAGE_SIZE;
 	map->cached_elem = NULL; // Only enables cache when burst frees are processed
+
 	list_for_each_entry_reverse(cur, &map->elem, list) {
 		// cur || new node
 		if (cur->end < start) {
@@ -154,6 +158,9 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 
 	if (map == NULL)
 		return -EINVAL;
+
+	map->size -= (end - start) / PAGE_SIZE;
+
 	if (map->cached_elem) {
 		cur = list_entry(map->cached_elem, struct sbpf_reverse_map_elem, list);
 
@@ -281,6 +288,7 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
 		new->end = cur->end;
 		list_add_tail(&new->list, &dst->elem);
 	}
+	dst->size = src->size;
 
 	return dst;
 }

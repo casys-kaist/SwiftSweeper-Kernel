@@ -103,7 +103,10 @@ struct page {
 				struct list_head pcp_list;
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
-			struct address_space *mapping;
+			union {
+				struct sbpf_reverse_map *sbpf_reverse;
+				struct address_space *mapping;
+			};
 			union {
 				pgoff_t index;		/* Our offset within mapping. */
 				unsigned long share;	/* share count for fsdax */
@@ -115,14 +118,7 @@ struct page {
 			 * Indicates order in the buddy system if PageBuddy.
 			 */
 
-#ifdef CONFIG_BPF_SBPF
-			union {
-				struct sbpf_reverse_map *sbpf_reverse;
-				unsigned long private;
-			};
-#else
 			unsigned long private;
-#endif
 		};
 		struct {	/* page_pool used by netstack */
 			/**

@@ -9,9 +9,6 @@
 
 // #define USE_MAPLE_TREE 1
 
-#define PAGE_SBPF_PRIVATE 0
-#define PAGE_SBPF_SHARED 1
-
 /* struct sbpf_reverse_map: [start , end) */
 struct sbpf_reverse_map_elem {
 	unsigned long start;
@@ -21,6 +18,7 @@ struct sbpf_reverse_map_elem {
 
 struct sbpf_reverse_map {
 	unsigned long paddr;
+	size_t size;
 #ifdef USE_MAPLE_TREE
 	struct maple_tree *mt;
 #else
