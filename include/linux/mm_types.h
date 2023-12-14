@@ -114,7 +114,15 @@ struct page {
 			 * Used for swp_entry_t if PageSwapCache.
 			 * Indicates order in the buddy system if PageBuddy.
 			 */
+
+#ifdef CONFIG_BPF_SBPF
+			union {
+				struct sbpf_reverse_map *sbpf_reverse;
+				unsigned long private;
+			};
+#else
 			unsigned long private;
+#endif
 		};
 		struct {	/* page_pool used by netstack */
 			/**
@@ -196,10 +204,6 @@ struct page {
 
 #ifdef CONFIG_MEMCG
 	unsigned long memcg_data;
-#endif
-
-#ifdef CONFIG_BPF_SBPF
-	struct sbpf_reverse_map *sbpf_reverse;
 #endif
 
 	/*
