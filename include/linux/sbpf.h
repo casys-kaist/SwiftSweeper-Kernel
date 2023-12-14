@@ -4,8 +4,6 @@
 #include <linux/types.h>
 #include <linux/bpf.h>
 
-#define SBPF_USER_VADDR_START 0x1000
-
 struct sbpf_vm_fault {
 	unsigned long vaddr;
 	size_t len;
@@ -21,9 +19,6 @@ struct sbpf_alloc_kmem {
 
 struct sbpf_task {
 	struct radix_tree_root user_shared_pages;
-	// FixMe!. This max_alloc_end is dangerous to use with the kernel mmap struct.
-	// Have to use free_pgd_range with user space vma informations.
-	unsigned long max_alloc_end;
 	// Used for reference counting of sbpf_task produced by the fork.
 	atomic_t ref;
 
@@ -52,6 +47,9 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 			   unsigned int flags);
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len);
 
+int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
+		   pte_t *dst_pte, pte_t *src_pte, unsigned long addr, int *rss,
+		   struct folio *folio);
 int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk);
 void exit_sbpf(struct task_struct *tsk);
 

@@ -1336,13 +1336,6 @@ void do_user_addr_fault(struct pt_regs *regs,
 	}
 #endif
 
-#ifdef CONFIG_BPF_SBPF
-	if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
-		if(!sbpf_handle_page_fault(current->sbpf, address, flags))
-			return;
-	}
-#endif
-
 #ifdef CONFIG_PER_VMA_LOCK
 	if (!(flags & FAULT_FLAG_USER))
 		goto lock_mmap;
