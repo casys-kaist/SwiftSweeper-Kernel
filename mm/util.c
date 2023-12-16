@@ -766,6 +766,11 @@ struct address_space *folio_mapping(struct folio *folio)
 	struct address_space *mapping;
 
 	/* This happens if someone calls flush_dcache_page on slab page */
+#ifdef CONFIG_BPF_SBPF
+	if (unlikely(folio_test_mbpf(folio)))
+		return NULL;
+#endif
+
 	if (unlikely(folio_test_slab(folio)))
 		return NULL;
 

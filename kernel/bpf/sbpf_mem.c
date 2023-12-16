@@ -236,6 +236,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	if ((unsigned long)orig_folio->page.sbpf_reverse->size !=
 	    folio_ref_count(orig_folio)) {
 		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+		folio_set_mbpf(folio);
 		if (unlikely(!folio))
 			return ERR_PTR(-ENOMEM);
 		if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
@@ -331,6 +332,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	if (ret) {
 		if (likely(ret == -ENOENT)) {
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			folio_set_mbpf(folio);
 			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
 			if (unlikely(!folio))
 				return -ENOMEM;
@@ -423,7 +425,7 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 		return -EINVAL;
 	}
 	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
-		BUG_ON(folio_ref_count(folio) != 0);
+		BUG_ON(folio_ref_count(folio) == 0);
 		paddr = folio->page.sbpf_reverse->paddr;
 		sbpf_reverse_delete(folio->page.sbpf_reverse);
 		folio->page.sbpf_reverse = NULL;
@@ -446,7 +448,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	if (!folio || !folio->page.sbpf_reverse)
 		return 0;
 	if (!(pte_flags(*pte) & _PAGE_RW)) {
-		// TODO! Optimize, If the folio will be droped, we don't have to copy on write.
+		// TODO! Optimize, If the folio will be droped, we don't have to do copy-on-write.
 		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
 		if (IS_ERR_OR_NULL(folio)) {
 			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
@@ -458,7 +460,6 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);
 	atomic_dec(&folio->_mapcount);
-	folio_put(folio);
 
 	if (aux->folio == NULL) {
 		aux->folio = folio;
@@ -469,6 +470,7 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 
 	if (aux->folio != folio) {
 		ret = unset_trie_entry(aux->start_addr, aux->end_addr, aux->folio);
+		folio_put_refs(aux->folio, (aux->end_addr - aux->start_addr) / PAGE_SIZE);
 		if (unlikely(ret))
 			return ret;
 
@@ -479,11 +481,12 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 		if (likely(aux->end_addr == addr)) {
 			aux->end_addr += PAGE_SIZE;
 		} else { // aliases : [mapped to canon(folio) x | unmmaped ... | mapped to canon(folio) x]
-			ret = unset_trie_entry(aux->start_addr, aux->end_addr,
-					       aux->folio);
+			ret = unset_trie_entry(aux->start_addr, aux->end_addr, folio);
 			if (unlikely(ret))
 				return ret;
 
+			folio_put_refs(folio,
+				       (aux->end_addr - aux->start_addr) / PAGE_SIZE);
 			// aux->folio = folio;
 			aux->start_addr = addr;
 			aux->end_addr = addr + PAGE_SIZE;
@@ -511,6 +514,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 					true);
 	if (aux.folio && likely(!ret)) {
 		ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
+		folio_put_refs(aux.folio, (aux.end_addr - aux.start_addr) / PAGE_SIZE);
 	}
 
 	if (unlikely(ret)) {

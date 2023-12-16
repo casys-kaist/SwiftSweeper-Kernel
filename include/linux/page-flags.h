@@ -136,6 +136,9 @@ enum pageflags {
 	PG_arch_2,
 	PG_arch_3,
 #endif
+#ifdef CONFIG_BPF_SBPF
+	PG_mbpf,
+#endif
 	__NR_PAGEFLAGS,
 
 	PG_readahead = PG_reclaim,
@@ -478,6 +481,7 @@ PAGEFLAG(Workingset, workingset, PF_HEAD)
 	TESTCLEARFLAG(Workingset, workingset, PF_HEAD)
 __PAGEFLAG(Slab, slab, PF_NO_TAIL)
 PAGEFLAG(Checked, checked, PF_NO_COMPOUND)	   /* Used by some filesystems */
+PAGEFLAG(MBpf, mbpf, PF_ANY)		   /* Used by mBPF */
 
 /* Xen */
 PAGEFLAG(Pinned, pinned, PF_NO_COMPOUND)
