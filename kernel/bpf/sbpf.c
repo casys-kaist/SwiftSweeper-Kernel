@@ -350,7 +350,6 @@ int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vm
 
 	folio_get(folio);
 	atomic_inc(&folio->_mapcount);
-	rss[MM_ANONPAGES]++;
 
 	return 0;
 }

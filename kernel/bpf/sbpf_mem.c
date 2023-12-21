@@ -236,6 +236,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	if ((unsigned long)orig_folio->page.sbpf_reverse->size !=
 	    folio_ref_count(orig_folio)) {
 		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+		inc_mm_counter(current->mm, MM_ANONPAGES);
 		folio_set_mbpf(folio);
 		if (unlikely(!folio))
 			return ERR_PTR(-ENOMEM);
@@ -456,7 +457,6 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 			return -EINVAL;
 		}
 	}
-	ptep_get_and_clear(current->mm, addr, pte);
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);
 	atomic_dec(&folio->_mapcount);
@@ -482,11 +482,11 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 			aux->end_addr += PAGE_SIZE;
 		} else { // aliases : [mapped to canon(folio) x | unmmaped ... | mapped to canon(folio) x]
 			ret = unset_trie_entry(aux->start_addr, aux->end_addr, folio);
+			folio_put_refs(folio,
+				       (aux->end_addr - aux->start_addr) / PAGE_SIZE);
 			if (unlikely(ret))
 				return ret;
 
-			folio_put_refs(folio,
-				       (aux->end_addr - aux->start_addr) / PAGE_SIZE);
 			// aux->folio = folio;
 			aux->start_addr = addr;
 			aux->end_addr = addr + PAGE_SIZE;
