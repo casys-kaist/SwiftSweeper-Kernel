@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <linux/radix-tree.h>
 #include <linux/maple_tree.h>
+#include <asm/pgtable_types.h>
 
 #define TRI_SIZE 512
 
@@ -41,7 +42,7 @@ struct trie_node {
 	};
 };
 
-typedef int (*pte_func)(pte_t *pte, unsigned long addr, void *aux);
+typedef int (*pte_func)(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux);
 
 extern const struct bpf_func_proto bpf_set_page_table_proto;
 extern const struct bpf_func_proto bpf_unset_page_table_proto;

@@ -16,6 +16,7 @@
 #include <linux/list.h>
 #include <linux/pgtable.h>
 #include <asm/tlb.h>
+#include <asm-generic/pgalloc.h>
 
 #include "sbpf_mem.h"
 
@@ -81,7 +82,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 								continue;
 							return -ENOENT;
 						}
-						ret = func(pte, addr, aux);
+						ret = func(pmd, pte, addr, aux);
 						if (unlikely(ret))
 							return ret;
 					} while (pte++, addr += PAGE_SIZE,
@@ -151,7 +152,7 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						pte = pte_offset_map(pmd, addr);
 
 					do {
-						ret = func(pte, addr, aux);
+						ret = func(pmd, pte, addr, aux);
 						if (unlikely(ret))
 							return ret;
 					} while (pte++, addr += PAGE_SIZE,
@@ -164,7 +165,7 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	return 0;
 }
 
-static int __get_wp_pte(pte_t *pte, unsigned long addr, void *aux)
+static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct folio *folio;
 	pte_t entry;
@@ -192,12 +193,13 @@ struct set_pte_aux {
 	pte_t *entry;
 };
 
-static int __set_pte(pte_t *pte, unsigned long addr, void *aux_)
+static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 {
 	struct folio *folio;
 	struct set_pte_aux *aux = aux_;
 
 	pte_t entry = *(aux->entry);
+	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 	folio = page_folio(pte_page(entry));
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
@@ -437,7 +439,7 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 	return 0;
 }
 
-static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
+static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 {
 	struct folio *folio;
 	struct unset_pte_aux *aux = _aux;
@@ -456,6 +458,10 @@ static int __unset_pte(pte_t *pte, unsigned long addr, void *_aux)
 			       addr);
 			return -EINVAL;
 		}
+	}
+	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
+		pmd_free(tlb->mm, pmd);
+		mm_dec_nr_pmds(tlb->mm);
 	}
 	pte_clear(current->mm, addr, pte);
 	tlb_remove_tlb_entry(tlb, pte, addr);

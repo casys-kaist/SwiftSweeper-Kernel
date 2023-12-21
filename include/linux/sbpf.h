@@ -53,4 +53,9 @@ int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vm
 int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk);
 void exit_sbpf(struct task_struct *tsk);
 
+/* APIs for the page table modification. */
+static inline void pte_ref_set(pgtable_t pte, int count)
+{
+	atomic_set(&pte->pte_refcount, count);
+}
 #endif

@@ -78,6 +78,7 @@
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
 #include <linux/sbpf.h>
+#include <linux/mm_types.h>
 
 #include <trace/events/kmem.h>
 
@@ -430,6 +431,9 @@ void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
 		 */
 		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
 		pmd_populate(mm, pmd, *pte);
+#ifdef CONFIG_BPF_SBPF
+		pte_ref_set(*pte, 0);
+#endif
 		*pte = NULL;
 	}
 	spin_unlock(ptl);

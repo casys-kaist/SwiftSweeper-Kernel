@@ -30,7 +30,7 @@ err:
 	return ret;
 }
 
-static int __handle_page_fault(pte_t *pte, unsigned long addr, void *aux)
+static int __handle_page_fault(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct folio *orig_folio = page_folio(pte_page(*pte));
 	struct sbpf_task *sbpf = aux;
