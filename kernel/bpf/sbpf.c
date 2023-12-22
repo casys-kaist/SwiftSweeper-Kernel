@@ -43,7 +43,7 @@ static int __handle_page_fault(pmd_t *pmd, pte_t *pte, unsigned long addr, void 
 		return -EINVAL;
 	}
 
-	return 0;
+	return SBPF_PTE_WALK_STOP;
 }
 
 int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,

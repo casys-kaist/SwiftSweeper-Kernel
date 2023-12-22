@@ -42,6 +42,12 @@ struct trie_node {
 	};
 };
 
+enum sbpf_pte_walk {
+	SBPF_PTE_WALK_NEXT_PTE,
+	SBPF_PTE_WALK_NEXT_PMD,
+	SBPF_PTE_WALK_STOP,
+};
+
 typedef int (*pte_func)(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux);
 
 extern const struct bpf_func_proto bpf_set_page_table_proto;

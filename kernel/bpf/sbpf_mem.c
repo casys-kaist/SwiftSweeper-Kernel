@@ -83,8 +83,19 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 							return -ENOENT;
 						}
 						ret = func(pmd, pte, addr, aux);
-						if (unlikely(ret))
-							return ret;
+						switch (ret) {
+						case SBPF_PTE_WALK_NEXT_PTE:
+							break;
+						case SBPF_PTE_WALK_NEXT_PMD:
+							addr = next_pmd - PAGE_SIZE;
+							ret = 0;
+							break;
+						case SBPF_PTE_WALK_STOP:
+							return 0;
+						default:
+							if (unlikely(ret))
+								return ret;
+						}
 					} while (pte++, addr += PAGE_SIZE,
 						 addr != next_pmd);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
@@ -153,8 +164,19 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 
 					do {
 						ret = func(pmd, pte, addr, aux);
-						if (unlikely(ret))
-							return ret;
+						switch (ret) {
+						case SBPF_PTE_WALK_NEXT_PTE:
+							break;
+						case SBPF_PTE_WALK_NEXT_PMD:
+							addr = next_pmd - PAGE_SIZE;
+							ret = 0;
+							break;
+						case SBPF_PTE_WALK_STOP:
+							return 0;
+						default:
+							if (unlikely(ret))
+								return ret;
+						}
 					} while (pte++, addr += PAGE_SIZE,
 						 addr != next_pmd);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
@@ -185,7 +207,7 @@ static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 		return -EINVAL;
 	}
 
-	return 0;
+	return SBPF_PTE_WALK_STOP;
 }
 
 struct set_pte_aux {
@@ -199,15 +221,15 @@ static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 	struct set_pte_aux *aux = aux_;
 
 	pte_t entry = *(aux->entry);
-	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 	folio = page_folio(pte_page(entry));
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
+	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 	if (aux->tlb != NULL)
 		tlb_remove_tlb_entry(aux->tlb, pte, addr);
 
-	return 0;
+	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio)
@@ -444,7 +466,8 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	struct folio *folio;
 	struct unset_pte_aux *aux = _aux;
 	struct mmu_gather *tlb = aux->tlb;
-	int ret;
+	struct page *pmd_page;
+	int ret = SBPF_PTE_WALK_NEXT_PTE;
 
 	folio = page_folio(pte_page(*pte));
 	// Temporary check the pte is mBPF folio by checking the reverse mapping exists.
@@ -459,19 +482,23 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 			return -EINVAL;
 		}
 	}
-	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
-		pmd_free(tlb->mm, pmd);
-		mm_dec_nr_pmds(tlb->mm);
-	}
-	pte_clear(current->mm, addr, pte);
-	tlb_remove_tlb_entry(tlb, pte, addr);
 	atomic_dec(&folio->_mapcount);
+	pte_clear(current->mm, addr, pte);
+	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
+		pmd_page = pmd_pgtable(*pmd);
+		pmd_clear(pmd);
+		tlb_flush_pte_range(tlb, addr & PMD_MASK, PMD_SIZE);
+		mm_dec_nr_ptes(tlb->mm);
+		ret = SBPF_PTE_WALK_NEXT_PMD;
+	} else {
+		tlb_remove_tlb_entry(tlb, pte, addr);
+	}
 
 	if (aux->folio == NULL) {
 		aux->folio = folio;
 		aux->start_addr = addr;
 		aux->end_addr = addr + PAGE_SIZE;
-		return 0;
+		return ret;
 	}
 
 	if (aux->folio != folio) {
@@ -499,7 +526,7 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
 static int bpf_unset_pte(unsigned long address, size_t len)
