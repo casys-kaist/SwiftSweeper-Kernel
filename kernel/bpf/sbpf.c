@@ -76,6 +76,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 {
 	unsigned long end;
+	struct sbpf_alloc_kmem *alloc_kmem;
 
 	end = PAGE_ALIGN(start + len);
 	start = PAGE_ALIGN_DOWN(start);
@@ -84,7 +85,11 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 		return -EINVAL;
 
 	for (; start < end; start += PAGE_SIZE) {
-		radix_tree_delete(&stask->user_shared_pages, start);
+		alloc_kmem = radix_tree_delete(&stask->user_shared_pages, start);
+		if (alloc_kmem) {
+			vfree(alloc_kmem->kaddr);
+			kfree(alloc_kmem);
+		}
 	}
 
 	return 0;
