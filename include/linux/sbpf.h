@@ -33,6 +33,8 @@ struct sbpf_task {
 		struct bpf_prog *prog;
 		void *aux;
 	} page_fault;
+	// Used for handling tlb flush.
+	struct mmu_gather *tlb;
 };
 
 struct bpf_sbpf_link {

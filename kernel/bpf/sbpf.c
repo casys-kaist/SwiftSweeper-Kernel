@@ -18,6 +18,10 @@
 int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 {
 	int ret = -EINVAL;
+	struct mmu_gather tlb;
+
+	tlb_gather_mmu(&tlb, current->mm);
+	current->sbpf->tlb = &tlb;
 
 	if (arg_ptr != NULL && prog != NULL &&
 	    copy_from_user(current->sbpf->sbpf_func.arg, arg_ptr, arg_len)) {
@@ -26,6 +30,8 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 
 	ret = prog->bpf_func(current->sbpf->sbpf_func.arg, NULL);
 
+	tlb_finish_mmu(&tlb);
+	current->sbpf->tlb = NULL;
 err:
 	return ret;
 }
@@ -53,12 +59,18 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	unsigned long vaddr = fault_addr & PAGE_MASK;
 	struct sbpf_vm_fault sbpf_fault;
 	int ret;
+	struct mmu_gather tlb;
+	tlb_gather_mmu(&tlb, current->mm);
+	current->sbpf->tlb = &tlb;
 
 	if (flags & FAULT_FLAG_WRITE) {
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
 						__handle_page_fault, sbpf, false);
-		if (!ret)
+		if (!ret) {
+			tlb_finish_mmu(&tlb);
+			current->sbpf->tlb = NULL;
 			return 0;
+		}
 	}
 
 	sbpf_fault.vaddr = fault_addr;
@@ -69,6 +81,9 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	// Call page fault function.
 	ret = current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
 	update_hiwater_rss(current->mm);
+
+	tlb_finish_mmu(&tlb);
+	current->sbpf->tlb = NULL;
 
 	return ret;
 }

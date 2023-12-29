@@ -211,7 +211,6 @@ static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 }
 
 struct set_pte_aux {
-	struct mmu_gather *tlb;
 	pte_t *entry;
 };
 
@@ -226,8 +225,7 @@ static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
 	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
-	if (aux->tlb != NULL)
-		tlb_remove_tlb_entry(aux->tlb, pte, addr);
+	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
 
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
@@ -240,7 +238,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	int ret;
 	pte_t entry;
 	struct set_pte_aux aux;
-	struct mmu_gather tlb;
 #ifdef USE_MAPLE_TREE
 	struct sbpf_reverse_map *smap;
 	MA_STATE(mas, NULL, 0, 0);
@@ -274,16 +271,11 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
-
-		tlb_gather_mmu(&tlb, current->mm);
-		aux.tlb = &tlb;
 	} else {
 		folio = orig_folio;
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
-
-		aux.tlb = NULL;
 	}
 
 	aux.entry = &entry;
@@ -317,8 +309,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		folio_put(folio);
 		atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
 		folio_put_refs(orig_folio, folio_ref_count(folio));
-
-		tlb_finish_mmu(&tlb);
 	}
 
 	return folio;
@@ -370,7 +360,6 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
 			aux.entry = &entry;
-			aux.tlb = NULL;
 
 			if (paddr != vaddr) {
 				ret = touch_page_table_pte_range(current->mm, paddr,
@@ -400,7 +389,6 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	} else {
 		folio = page_folio(pte_page(entry));
 		aux.entry = &entry;
-		aux.tlb = NULL;
 
 		if (unlikely(folio->page.sbpf_reverse == NULL)) {
 			printk("mbpf: invalid remapping request without BPF_MBPF mmap flags 0x%lx\n",
@@ -432,7 +420,6 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 }
 
 struct unset_pte_aux {
-	struct mmu_gather *tlb;
 	uint64_t start_addr;
 	uint64_t end_addr;
 	struct folio *folio;
@@ -465,7 +452,6 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 {
 	struct folio *folio;
 	struct unset_pte_aux *aux = _aux;
-	struct mmu_gather *tlb = aux->tlb;
 	struct page *pmd_page;
 	int ret = SBPF_PTE_WALK_NEXT_PTE;
 
@@ -482,16 +468,18 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 			return -EINVAL;
 		}
 	}
+
 	atomic_dec(&folio->_mapcount);
 	pte_clear(current->mm, addr, pte);
+
 	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
 		pmd_page = pmd_pgtable(*pmd);
 		pmd_clear(pmd);
-		tlb_flush_pte_range(tlb, addr & PMD_MASK, PMD_SIZE);
-		mm_dec_nr_ptes(tlb->mm);
+		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
+		mm_dec_nr_ptes(current->sbpf->tlb->mm);
 		ret = SBPF_PTE_WALK_NEXT_PMD;
 	} else {
-		tlb_remove_tlb_entry(tlb, pte, addr);
+		tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
 	}
 
 	if (aux->folio == NULL) {
@@ -532,14 +520,10 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 static int bpf_unset_pte(unsigned long address, size_t len)
 {
 	struct mm_struct *mm = current->mm;
-	struct mmu_gather tlb;
 	struct unset_pte_aux aux;
 	int ret = 0;
 
-	tlb_gather_mmu(&tlb, mm);
-
 	address = address & PAGE_MASK;
-	aux.tlb = &tlb;
 	aux.folio = NULL;
 
 	aux.end_addr = address + len;
@@ -553,11 +537,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	if (unlikely(ret)) {
 		printk("mbpf: bpf_unset_pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
 		       ret, address, len);
-		goto out;
 	}
-
-out:
-	tlb_finish_mmu(&tlb);
 
 	return ret;
 }
@@ -566,7 +546,6 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 			 unsigned long prot)
 {
 	struct mm_struct *mm = current->mm;
-	struct mmu_gather tlb;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pmd_t *pmd;
@@ -589,7 +568,6 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 	newprot = calc_vm_prot_bits(prot, 0);
 	new_pgprot = vm_get_page_prot(newprot);
 
-	tlb_gather_mmu(&tlb, mm);
 	// mprotect_fixup
 	// change_protection
 	// change_protection_range
@@ -623,11 +601,10 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 		set_pte_at(mm, address, pte, newpte);
 
 		if (pte_needs_flush(oldpte, newpte))
-			tlb_flush_pte_range(&tlb, address, PAGE_SIZE);
+			tlb_flush_pte_range(current->sbpf->tlb, address, PAGE_SIZE);
 
 		// TODO: COW.
 	}
-	tlb_finish_mmu(&tlb);
 
 	return 0;
 
