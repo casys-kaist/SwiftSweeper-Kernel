@@ -33,6 +33,7 @@ struct sbpf_mm_struct {
 	struct list_head children;
 	struct list_head elem;
 	atomic_t refcnt;
+	spinlock_t pgtable_lock;
 };
 
 struct trie_node {

@@ -22,17 +22,21 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	if (arg_ptr != NULL && prog != NULL &&
 	    copy_from_user(current->sbpf->sbpf_func.arg, arg_ptr, arg_len)) {
-		goto err;
+		goto done;
 	}
 
 	ret = prog->bpf_func(current->sbpf->sbpf_func.arg, NULL);
 
 	tlb_finish_mmu(&tlb);
 	current->sbpf->tlb = NULL;
-err:
+
+done:
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+
 	return ret;
 }
 
@@ -62,6 +66,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	struct mmu_gather tlb;
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	if (flags & FAULT_FLAG_WRITE) {
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
@@ -69,7 +74,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 		if (!ret) {
 			tlb_finish_mmu(&tlb);
 			current->sbpf->tlb = NULL;
-			return 0;
+			goto done;
 		}
 	}
 
@@ -84,6 +89,9 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 
 	tlb_finish_mmu(&tlb);
 	current->sbpf->tlb = NULL;
+
+done:
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return ret;
 }
@@ -272,6 +280,7 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	sbpf->page_fault.sbpf_mm->parent = NULL;
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
 	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
+	spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return 0;
 }
@@ -340,7 +349,7 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 	void __rcu **slot;
 
 	if (!atomic_dec_and_test(&sbpf->ref)) {
-		radix_tree_for_each_slot(slot, &sbpf->user_shared_pages, &iter, 0) {
+		radix_tree_for_each_slot (slot, &sbpf->user_shared_pages, &iter, 0) {
 			alloc_kmem = rcu_dereference_protected(*slot, true);
 			vfree(alloc_kmem->kaddr);
 			kfree(alloc_kmem);
@@ -420,7 +429,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	// This is because the parent process (current) will has a different page
 	// from the original process. If we do not clean up, the parent process and
 	// bpf functions will have a wrong page view from the user space view.
-	radix_tree_for_each_slot(slot, &current->sbpf->user_shared_pages, &iter, 0) {
+	radix_tree_for_each_slot (slot, &current->sbpf->user_shared_pages, &iter, 0) {
 		radix_tree_iter_delete(&current->sbpf->user_shared_pages, &iter, slot);
 	}
 

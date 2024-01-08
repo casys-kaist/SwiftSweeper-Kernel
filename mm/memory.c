@@ -1158,6 +1158,10 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next))
 			return -ENOMEM;
+		if (src_vma->vm_flags & VM_MBPF) {
+			atomic_set(&pmd_pgtable(*dst_pmd)->pte_refcount, 
+				atomic_read(&pmd_pgtable(*src_pmd)->pte_refcount));
+		}
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
 	return 0;
 }

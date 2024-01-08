@@ -88,7 +88,6 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 							break;
 						case SBPF_PTE_WALK_NEXT_PMD:
 							addr = next_pmd - PAGE_SIZE;
-							ret = 0;
 							break;
 						case SBPF_PTE_WALK_STOP:
 							return 0;
@@ -190,28 +189,30 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct folio *folio;
-	pte_t entry;
 
 	folio = page_folio(pte_page(*pte));
-	if (!IS_ERR_OR_NULL(folio)) {
+	if (likely(!IS_ERR_OR_NULL(folio))) {
 		if (!(pte_flags(*pte) & _PAGE_RW)) {
 			folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+			if (unlikely(IS_ERR_OR_NULL(folio))) {
+				printk("mbpf: copy on write failed on __get_wp_pte 0x%lx\n",
+				       addr);
+				return -EINVAL;
+			}
 		}
-
-		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
-		entry = pte_sw_mkyoung(entry);
-		entry = pte_mkwrite(entry);
-		*(pte_t *)aux = entry;
 	} else {
-		printk("mbpf: copy on write failed on bpf_set_pte 0x%lx\n", addr);
+		printk("mbpf: __get_wp_pte failed 0x%lx\n", addr);
 		return -EINVAL;
 	}
+
+	*(pte_t *)aux = *pte;
 
 	return SBPF_PTE_WALK_STOP;
 }
 
 struct set_pte_aux {
 	pte_t *entry;
+	bool update_pmd;
 };
 
 static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
@@ -224,8 +225,10 @@ static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
-	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
+	if (aux->update_pmd) {
+		atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
+	}
 
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
@@ -279,6 +282,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	}
 
 	aux.entry = &entry;
+	aux.update_pmd = false;
 #ifdef USE_MAPLE_TREE
 	mas.tree = folio->page.sbpf_reverse->mt;
 	mas_for_each(&mas, smap, ULONG_MAX)
@@ -294,7 +298,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 	}
 #else
-	list_for_each_entry(cur, &folio->page.sbpf_reverse->elem, list) {
+	list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
 		cnt += (cur->end - cur->start) / PAGE_SIZE;
 		ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
 						__set_pte, &aux, false);
@@ -360,6 +364,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 			entry = pte_sw_mkyoung(entry);
 			entry = pte_mkwrite(entry);
 			aux.entry = &entry;
+			aux.update_pmd = true;
 
 			if (paddr != vaddr) {
 				ret = touch_page_table_pte_range(current->mm, paddr,
@@ -389,6 +394,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	} else {
 		folio = page_folio(pte_page(entry));
 		aux.entry = &entry;
+		aux.update_pmd = true;
 
 		if (unlikely(folio->page.sbpf_reverse == NULL)) {
 			printk("mbpf: invalid remapping request without BPF_MBPF mmap flags 0x%lx\n",
@@ -471,15 +477,15 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 
 	atomic_dec(&folio->_mapcount);
 	pte_clear(current->mm, addr, pte);
+	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
 
 	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
 		pmd_page = pmd_pgtable(*pmd);
 		pmd_clear(pmd);
 		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
 		mm_dec_nr_ptes(current->sbpf->tlb->mm);
+		pte_free(current->mm, pmd_page);
 		ret = SBPF_PTE_WALK_NEXT_PMD;
-	} else {
-		tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
 	}
 
 	if (aux->folio == NULL) {
