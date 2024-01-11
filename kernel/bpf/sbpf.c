@@ -108,7 +108,8 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 		return -EINVAL;
 
 	for (; start < end; start += PAGE_SIZE) {
-		alloc_kmem = radix_tree_delete(&stask->user_shared_pages, start);
+		alloc_kmem = radix_tree_delete(
+			stask->page_fault.sbpf_mm->user_shared_pages, start);
 		if (alloc_kmem) {
 			vfree(alloc_kmem->kaddr);
 			kfree(alloc_kmem);
@@ -137,7 +138,7 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	uaddr = (void *)PAGE_ALIGN_DOWN((uint64_t)uaddr);
 
 	// Todo: Optimize this entry to trie
-	cur = radix_tree_lookup(&current->sbpf->user_shared_pages,
+	cur = radix_tree_lookup(current->sbpf->page_fault.sbpf_mm->user_shared_pages,
 				((unsigned long)uaddr));
 	if (cur)
 		return cur;
@@ -162,8 +163,8 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	allocated_mem->kaddr = kaddr;
 	allocated_mem->uaddr = uaddr;
 
-	radix_tree_insert(&current->sbpf->user_shared_pages, (unsigned long)uaddr,
-			  allocated_mem);
+	radix_tree_insert(current->sbpf->page_fault.sbpf_mm->user_shared_pages,
+			  (unsigned long)uaddr, allocated_mem);
 
 err:
 	for (page_index = 0; page_index < ret; page_index++)
@@ -187,7 +188,7 @@ BPF_CALL_2(bpf_get_shared_page, void *, kaddr, size_t, len)
 	sbpf = current->sbpf;
 	offset = kaddr - (void *)PAGE_ALIGN_DOWN((uint64_t)kaddr);
 
-	cur = radix_tree_lookup(&sbpf->user_shared_pages,
+	cur = radix_tree_lookup(sbpf->page_fault.sbpf_mm->user_shared_pages,
 				((unsigned long)(kaddr - offset)));
 	if (cur && (len + offset) < PAGE_SIZE * cur->nr_pages) {
 		return (unsigned long)(cur->kaddr + offset);
@@ -265,6 +266,18 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	struct sbpf_alloc_kmem *aux_page;
 	off_t offset;
 
+	sbpf->page_fault.prog = prog;
+	bpf_prog_inc(prog);
+
+	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
+	sbpf->page_fault.sbpf_mm->user_shared_pages =
+		kmalloc(sizeof(struct radix_tree_root), GFP_KERNEL);
+	sbpf->page_fault.sbpf_mm->parent = NULL;
+	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
+	INIT_RADIX_TREE(sbpf->page_fault.sbpf_mm->user_shared_pages, GFP_KERNEL);
+	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
+	spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_lock);
+
 	if (aux_ptr) {
 		aux_page = uaddr_to_kaddr(aux_ptr, PAGE_SIZE);
 		offset = aux_ptr - aux_page->uaddr;
@@ -272,15 +285,6 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	} else {
 		sbpf->page_fault.aux = NULL;
 	}
-
-	sbpf->page_fault.prog = prog;
-	bpf_prog_inc(prog);
-
-	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
-	sbpf->page_fault.sbpf_mm->parent = NULL;
-	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
-	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
-	spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return 0;
 }
@@ -336,26 +340,26 @@ out_sbpf:
 static void release_sbpf_mm_struct(struct task_struct *tsk,
 				   struct sbpf_mm_struct *sbpf_mm)
 {
+	struct sbpf_alloc_kmem *alloc_kmem;
+	struct radix_tree_iter iter;
+	void __rcu **slot;
 	if (sbpf_mm == NULL || !atomic_dec_and_test(&sbpf_mm->refcnt))
 		return;
 
+	radix_tree_for_each_slot (slot, sbpf_mm->user_shared_pages, &iter, 0) {
+		alloc_kmem = rcu_dereference_protected(*slot, true);
+		vfree(alloc_kmem->kaddr);
+		kfree(alloc_kmem);
+		radix_tree_iter_delete(sbpf_mm->user_shared_pages, &iter, slot);
+	}
+
+	kfree(sbpf_mm->user_shared_pages);
 	kfree(sbpf_mm);
 }
 
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 {
-	struct sbpf_alloc_kmem *alloc_kmem;
-	struct radix_tree_iter iter;
-	void __rcu **slot;
-
 	if (!atomic_dec_and_test(&sbpf->ref)) {
-		radix_tree_for_each_slot (slot, &sbpf->user_shared_pages, &iter, 0) {
-			alloc_kmem = rcu_dereference_protected(*slot, true);
-			vfree(alloc_kmem->kaddr);
-			kfree(alloc_kmem);
-			radix_tree_iter_delete(&sbpf->user_shared_pages, &iter, slot);
-		}
-
 		if (sbpf->sbpf_func.prog) {
 			bpf_prog_put(sbpf->sbpf_func.prog);
 			kfree(sbpf->sbpf_func.arg);
@@ -389,6 +393,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 {
 	struct sbpf_task *old_sbpf;
 	struct radix_tree_iter iter;
+	struct sbpf_alloc_kmem *alloc_kmem;
 	void __rcu **slot;
 
 	if (current->sbpf == NULL) {
@@ -418,19 +423,21 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	if (current->sbpf->sbpf_func.prog != NULL) {
-		init_sbpf_function(tsk->sbpf, NULL, current->sbpf->sbpf_func.prog);
-		memcpy(tsk->sbpf->sbpf_func.arg, current->sbpf->sbpf_func.arg, PAGE_SIZE);
+		init_sbpf_function(tsk->sbpf, NULL, old_sbpf->sbpf_func.prog);
+		memcpy(tsk->sbpf->sbpf_func.arg, old_sbpf->sbpf_func.arg, PAGE_SIZE);
 	}
-
-	INIT_RADIX_TREE(&tsk->sbpf->user_shared_pages, GFP_ATOMIC);
-	atomic_inc(&current->sbpf->ref);
 
 	// We have to clean up user shared pages in case of fork.
 	// This is because the parent process (current) will has a different page
 	// from the original process. If we do not clean up, the parent process and
 	// bpf functions will have a wrong page view from the user space view.
-	radix_tree_for_each_slot (slot, &current->sbpf->user_shared_pages, &iter, 0) {
-		radix_tree_iter_delete(&current->sbpf->user_shared_pages, &iter, slot);
+	radix_tree_for_each_slot (slot, old_sbpf->page_fault.sbpf_mm->user_shared_pages,
+				  &iter, 0) {
+		alloc_kmem = rcu_dereference_protected(*slot, true);
+		vfree(alloc_kmem->kaddr);
+		kfree(alloc_kmem);
+		radix_tree_iter_delete(old_sbpf->page_fault.sbpf_mm->user_shared_pages,
+				       &iter, slot);
 	}
 
 	return 0;
@@ -460,8 +467,6 @@ int bpf_prog_load_sbpf(struct bpf_prog *prog)
 	current->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
 	if (current->sbpf == NULL)
 		return -ENOMEM;
-
-	INIT_RADIX_TREE(&current->sbpf->user_shared_pages, GFP_ATOMIC);
 
 	return 0;
 }

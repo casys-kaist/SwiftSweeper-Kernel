@@ -29,6 +29,7 @@ struct sbpf_reverse_map {
 };
 
 struct sbpf_mm_struct {
+	struct radix_tree_root *user_shared_pages;
 	struct sbpf_mm_struct *parent;
 	struct list_head children;
 	struct list_head elem;

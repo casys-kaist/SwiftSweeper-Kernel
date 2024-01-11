@@ -18,7 +18,6 @@ struct sbpf_alloc_kmem {
 };
 
 struct sbpf_task {
-	struct radix_tree_root user_shared_pages;
 	// Used for reference counting of sbpf_task produced by the fork.
 	atomic_t ref;
 
