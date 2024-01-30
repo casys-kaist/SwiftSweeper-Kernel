@@ -100,12 +100,17 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 {
 	unsigned long end;
 	struct sbpf_alloc_kmem *alloc_kmem;
+	int ret = 0;
 
 	end = PAGE_ALIGN(start + len);
 	start = PAGE_ALIGN_DOWN(start);
 
-	if (end <= start || stask == NULL)
-		return -EINVAL;
+	spin_lock(&stask->page_fault.sbpf_mm->pgtable_lock);
+
+	if (end <= start || stask == NULL) {
+		ret = -EINVAL;
+		goto done;
+	}
 
 	for (; start < end; start += PAGE_SIZE) {
 		alloc_kmem = radix_tree_delete(
@@ -116,7 +121,10 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 		}
 	}
 
-	return 0;
+done:
+	spin_unlock(&stask->page_fault.sbpf_mm->pgtable_lock);
+
+	return ret;
 }
 
 struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
