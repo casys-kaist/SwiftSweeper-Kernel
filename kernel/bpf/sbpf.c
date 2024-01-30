@@ -410,6 +410,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	old_sbpf = current->sbpf;
+	spin_lock(&old_sbpf->page_fault.sbpf_mm->pgtable_lock);
 	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
 
 	/* Initialize the sbpf_mm struct. */
@@ -447,6 +448,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 		radix_tree_iter_delete(old_sbpf->page_fault.sbpf_mm->user_shared_pages,
 				       &iter, slot);
 	}
+	spin_unlock(&old_sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return 0;
 }
