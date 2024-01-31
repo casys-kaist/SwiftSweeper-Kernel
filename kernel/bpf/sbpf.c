@@ -22,7 +22,7 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (arg_ptr != NULL && prog != NULL &&
 	    copy_from_user(current->sbpf->sbpf_func.arg, arg_ptr, arg_len)) {
@@ -35,7 +35,7 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 	current->sbpf->tlb = NULL;
 
 done:
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	return ret;
 }
@@ -66,16 +66,19 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	struct mmu_gather tlb;
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (flags & FAULT_FLAG_WRITE) {
+		spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
 						__handle_page_fault, sbpf, false);
 		if (!ret) {
 			tlb_finish_mmu(&tlb);
 			current->sbpf->tlb = NULL;
+			spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 			goto done;
 		}
+		spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 	}
 
 	sbpf_fault.vaddr = fault_addr;
@@ -91,7 +94,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	current->sbpf->tlb = NULL;
 
 done:
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	return ret;
 }
@@ -105,7 +108,7 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 	end = PAGE_ALIGN(start + len);
 	start = PAGE_ALIGN_DOWN(start);
 
-	spin_lock(&stask->page_fault.sbpf_mm->pgtable_lock);
+	write_lock(&stask->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (end <= start || stask == NULL) {
 		ret = -EINVAL;
@@ -122,7 +125,7 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 	}
 
 done:
-	spin_unlock(&stask->page_fault.sbpf_mm->pgtable_lock);
+	write_unlock(&stask->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	return ret;
 }
@@ -285,6 +288,7 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	INIT_RADIX_TREE(sbpf->page_fault.sbpf_mm->user_shared_pages, GFP_KERNEL);
 	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
 	spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_lock);
+	rwlock_init(&sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (aux_ptr) {
 		aux_page = uaddr_to_kaddr(aux_ptr, PAGE_SIZE);
@@ -410,7 +414,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	old_sbpf = current->sbpf;
-	spin_lock(&old_sbpf->page_fault.sbpf_mm->pgtable_lock);
+	write_lock(&old_sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
 
 	/* Initialize the sbpf_mm struct. */
@@ -448,7 +452,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 		radix_tree_iter_delete(old_sbpf->page_fault.sbpf_mm->user_shared_pages,
 				       &iter, slot);
 	}
-	spin_unlock(&old_sbpf->page_fault.sbpf_mm->pgtable_lock);
+	write_unlock(&old_sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	return 0;
 }

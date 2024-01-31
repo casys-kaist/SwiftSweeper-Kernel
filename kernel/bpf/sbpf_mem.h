@@ -30,6 +30,7 @@ struct sbpf_reverse_map {
 
 struct sbpf_mm_struct {
 	struct radix_tree_root *user_shared_pages;
+	rwlock_t user_shared_pages_lock;
 	struct sbpf_mm_struct *parent;
 	struct list_head children;
 	struct list_head elem;

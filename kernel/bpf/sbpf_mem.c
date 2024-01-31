@@ -621,12 +621,17 @@ error:
 BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long, paddr,
 	   unsigned long, vmf_flags, unsigned long, prot)
 {
+	int ret;
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
 		return -EINVAL;
 
-	return bpf_set_pte(vaddr, len, paddr, vmf_flags, prot);
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	ret = bpf_set_pte(vaddr, len, paddr, vmf_flags, prot);
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+
+	return ret;
 }
 
 const struct bpf_func_proto bpf_set_page_table_proto = {
@@ -637,12 +642,17 @@ const struct bpf_func_proto bpf_set_page_table_proto = {
 
 BPF_CALL_2(bpf_unset_page_table, unsigned long, vaddr, size_t, len)
 {
+	int ret;
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
 		return -EINVAL;
 
-	return bpf_unset_pte(vaddr, len);
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	ret = bpf_unset_pte(vaddr, len);
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+
+	return ret;
 }
 
 const struct bpf_func_proto bpf_unset_page_table_proto = {
@@ -654,12 +664,17 @@ const struct bpf_func_proto bpf_unset_page_table_proto = {
 BPF_CALL_5(bpf_touch_page_table, unsigned long, vaddr, size_t, len, unsigned long, paddr,
 	   unsigned long, vmf_flags, unsigned long, prot)
 {
+	int ret;
 	vaddr = vaddr & PAGE_MASK;
 
 	if (!current->sbpf)
 		return -EINVAL;
 
-	return bpf_touch_pte(vaddr, len, vmf_flags, prot);
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	ret = bpf_touch_pte(vaddr, len, vmf_flags, prot);
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+
+	return ret;
 }
 
 const struct bpf_func_proto bpf_touch_page_table_proto = {
