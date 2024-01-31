@@ -123,6 +123,11 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 	map->cached_elem = NULL; // Only enables cache when burst frees are processed
 
 	list_for_each_entry_reverse(cur, &map->elem, list) {
+		// new node should not be overlapped with other nodes
+		if (unlikely(cur->start < end && start < cur->end)) {
+			printk("mbpf: assertion failed in insert_range");
+			return -EINVAL;
+		}
 		// cur || new node
 		if (cur->end < start) {
 			list_add(&init_reverse_map_elem(start, end)->list, &cur->list);
