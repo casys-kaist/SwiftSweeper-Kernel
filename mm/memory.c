@@ -5253,21 +5253,24 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	lru_gen_enter_fault(vma);
 
 #ifdef CONFIG_BPF_SBPF
+	if (vma->vm_flags & VM_MBPF) {
 		if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
 			ret = sbpf_handle_page_fault(current->sbpf, address, flags);
 			if (ret)
 				ret = VM_FAULT_SIGSEGV;
-			goto done_sbpf;
-		} 
+		} else {
+			ret = VM_FAULT_SIGSEGV;
+		}
 #else
 		ret = -EINVAL;
 #endif
+	} else {
 		if (unlikely(is_vm_hugetlb_page(vma)))
 			ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
 		else
 			ret = __handle_mm_fault(vma, address, flags);
+	}
 
-done_sbpf:
 	lru_gen_exit_fault();
 
 	if (flags & FAULT_FLAG_USER) {
