@@ -10,14 +10,7 @@
 // Initialize trie node
 void trie_init(struct trie_node **node)
 {
-	// #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
-	// 	struct profile_t *profile = &current->sbpf->profile;
-	// #endif
 	*node = (struct trie_node *)get_zeroed_page(GFP_KERNEL);
-
-	// DEBUG_INC_COUNT(profile, trie_insert_count);
-	// DEBUG_INC_VAL(profile, trie_used, ksize(*node));
-	// DEBUG_INC_VAL(profile, trie_requested, ksize(*node));
 }
 
 // Insert data into trie
@@ -83,9 +76,6 @@ int trie_remove(struct trie_node *root, uint64_t caddr)
 
 int __trie_free(struct trie_node *root, int depth)
 {
-	// #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
-	// 	struct profile_t *profile = &current->sbpf->profile;
-	// #endif
 	if (root == NULL || depth == 3)
 		return 0;
 
@@ -93,9 +83,6 @@ int __trie_free(struct trie_node *root, int depth)
 		if (root->trie_node[i] != NULL)
 			__trie_free(root->trie_node[i], depth + 1);
 	}
-
-	// DEBUG_INC_COUNT(profile, trie_free_count);
-	// DEBUG_DEC_VAL(profile, trie_used, ksize(root));
 	kfree(root);
 	return 0;
 }
