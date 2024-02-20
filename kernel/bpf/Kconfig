@@ -104,4 +104,9 @@ config BPF_SBPF
 	help
 	  Enables sBPF.
 
+config BPF_SBPF_MEM_DEBUG
+	bool "Enable sBPF memory debug"
+	help
+	  Enables sBPF memory debug.
+
 endmenu # "BPF subsystem"

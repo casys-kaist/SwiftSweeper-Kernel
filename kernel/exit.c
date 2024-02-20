@@ -811,6 +811,9 @@ void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
 	int group_dead;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	print_debug_info(tsk);
+#endif
 
 	WARN_ON(irqs_disabled());
 

@@ -92,9 +92,16 @@ static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long 
 {
 	struct sbpf_reverse_map_elem *map_elem =
 		kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
 	map_elem->start = start;
 	map_elem->end = end;
 	INIT_LIST_HEAD(&map_elem->list);
+
+	DEBUG_INC_COUNT(profile, reverse_insert_count);
+	DEBUG_INC_VAL(profile, reverse_used, ksize(map_elem));
+	DEBUG_CMP_INC_VAL(profile, reverse_max, reverse_used);
 	return map_elem;
 }
 
@@ -102,11 +109,18 @@ void *sbpf_reverse_init(unsigned long paddr)
 {
 	struct sbpf_reverse_map *map =
 		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
+
 	INIT_LIST_HEAD(&map->elem);
 	map->cached_elem = NULL;
 	map->paddr = paddr;
 	map->size = 0;
 
+	DEBUG_INC_COUNT(profile, reverse_insert_count);
+	DEBUG_INC_VAL(profile, reverse_used, ksize(map));
+	DEBUG_CMP_INC_VAL(profile, reverse_max, reverse_used);
 	return map;
 }
 
@@ -115,6 +129,9 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
 	struct sbpf_reverse_map_elem *prev = NULL;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
 
 	if (map == NULL)
 		return -EINVAL;
@@ -122,7 +139,7 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 	map->size += (end - start) / PAGE_SIZE;
 	map->cached_elem = NULL; // Only enables cache when burst frees are processed
 
-	list_for_each_entry_reverse(cur, &map->elem, list) {
+	list_for_each_entry_reverse (cur, &map->elem, list) {
 		// new node should not be overlapped with other nodes
 		if (unlikely(cur->start < end && start < cur->end)) {
 			printk("mbpf: assertion failed in insert_range");
@@ -146,6 +163,8 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 			if (prev != NULL && prev->end == cur->start) {
 				prev->end = cur->end;
 				list_del(&cur->list);
+				DEBUG_INC_COUNT(profile, reverse_remove_count);
+				DEBUG_DEC_VAL(profile, reverse_used, ksize(cur));
 				kfree(cur);
 			}
 			return 0;
@@ -160,6 +179,9 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 			      uint64_t end)
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
 
 	if (map == NULL)
 		return -EINVAL;
@@ -171,7 +193,7 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 
 		if (cur->start <= start) {
 			// deleted node is right after cur or within cur
-			list_for_each_entry_from(cur, &map->elem, list) {
+			list_for_each_entry_from (cur, &map->elem, list) {
 				// guaranteed to be within one node
 				if (cur->start <= start && end <= cur->end) {
 					if (cur->start == start) {
@@ -187,6 +209,12 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 									cur->list.prev;
 							}
 							list_del(&cur->list);
+							DEBUG_INC_COUNT(
+								profile,
+								reverse_remove_count);
+							DEBUG_DEC_VAL(profile,
+								      reverse_used,
+								      ksize(cur));
 							kfree(cur);
 						} else { // end < cur->end
 							cur->start = end;
@@ -220,7 +248,7 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 	}
 
 	// list_for_each_entry(cur, &map->elem, list) {
-	list_for_each_entry_from_reverse(cur, &map->elem, list) {
+	list_for_each_entry_from_reverse (cur, &map->elem, list) {
 		// guaranteed to be within one node
 		if (cur->start <= start && end <= cur->end) {
 			if (cur->start == start) {
@@ -232,6 +260,8 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 						map->cached_elem = cur->list.prev;
 					}
 					list_del(&cur->list);
+					DEBUG_INC_COUNT(profile, reverse_remove_count);
+					DEBUG_DEC_VAL(profile, reverse_used, ksize(cur));
 					kfree(cur);
 				} else { // end < cur->end
 					cur->start = end;
@@ -265,15 +295,21 @@ void sbpf_reverse_delete(struct sbpf_reverse_map *map)
 {
 	struct sbpf_reverse_map_elem *cur = NULL;
 	struct sbpf_reverse_map_elem *next = NULL;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
 
 	if (map == NULL)
 		return;
 
-	list_for_each_entry_safe(cur, next, &map->elem, list) {
+	list_for_each_entry_safe (cur, next, &map->elem, list) {
 		list_del(&cur->list);
+		DEBUG_INC_COUNT(profile, reverse_remove_count);
+		DEBUG_DEC_VAL(profile, reverse_used, ksize(cur));
 		kfree(cur);
 	}
-
+	DEBUG_INC_COUNT(profile, reverse_remove_count);
+	DEBUG_DEC_VAL(profile, reverse_used, ksize(map));
 	kfree(map);
 }
 
@@ -282,15 +318,23 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
 	struct sbpf_reverse_map *dst = NULL;
 	struct sbpf_reverse_map_elem *cur = NULL;
 	struct sbpf_reverse_map_elem *new = NULL;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile = &current->sbpf->profile;
+#endif
 
 	if (src == NULL)
 		return NULL;
 
 	dst = sbpf_reverse_init(src->paddr);
-	list_for_each_entry(cur, &src->elem, list) {
+	list_for_each_entry (cur, &src->elem, list) {
 		new = kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
 		new->start = cur->start;
 		new->end = cur->end;
+
+		DEBUG_INC_COUNT(profile, reverse_insert_count);
+		DEBUG_INC_VAL(profile, reverse_used, ksize(new));
+		DEBUG_CMP_INC_VAL(profile, reverse_max, reverse_used);
+
 		list_add_tail(&new->list, &dst->elem);
 	}
 	dst->size = src->size;
@@ -306,7 +350,7 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 		return;
 
 	printk(KERN_INFO "dump reverse map:\n");
-	list_for_each_entry(cur, &map->elem, list) {
+	list_for_each_entry (cur, &map->elem, list) {
 		printk(KERN_INFO "\tstart: %lx, end: %lx\n", cur->start, cur->end);
 	}
 }

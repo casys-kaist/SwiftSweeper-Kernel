@@ -104,6 +104,7 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 	unsigned long end;
 	struct sbpf_alloc_kmem *alloc_kmem;
 	int ret = 0;
+	// struct profile_t *profile = &current->sbpf->profile;
 
 	end = PAGE_ALIGN(start + len);
 	start = PAGE_ALIGN_DOWN(start);
@@ -120,6 +121,7 @@ int sbpf_munmap(struct sbpf_task *stask, unsigned long start, size_t len)
 			stask->page_fault.sbpf_mm->user_shared_pages, start);
 		if (alloc_kmem) {
 			vfree(alloc_kmem->kaddr);
+			// DEBUG_DEC_VAL(profile, radix_used, ksize(alloc_kmem));
 			kfree(alloc_kmem);
 		}
 	}
@@ -140,6 +142,9 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	struct sbpf_alloc_kmem *allocated_mem = NULL;
 	struct sbpf_alloc_kmem *cur = NULL;
 	uint64_t offset;
+	// #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	// 	struct profile_t *profile = &current->sbpf->profile;
+	// #endif
 
 	if (!current->sbpf)
 		return NULL;
@@ -159,6 +164,9 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 
 	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL | GFP_ATOMIC);
 
+	// DEBUG_INC_VAL(profile, uaddr_to_kaddr_used, ksize(pages));
+	// DEBUG_CMP_INC_VAL(profile, uaddr_to_kaddr_max, uaddr_to_kaddr_used);
+
 	ret = get_user_pages_remote(current->mm, (unsigned long)uaddr, nr_pages,
 				    FOLL_WRITE, pages, NULL, NULL);
 	if (ret <= 0 || ret != nr_pages)
@@ -170,6 +178,9 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	if (!allocated_mem)
 		goto err;
 
+	// DEBUG_INC_VAL(profile, uaddr_to_kaddr_used, ksize(allocated_mem));
+	// DEBUG_CMP_INC_VAL(profile, uaddr_to_kaddr_max, uaddr_to_kaddr_used);
+
 	allocated_mem->nr_pages = nr_pages;
 	allocated_mem->kaddr = kaddr;
 	allocated_mem->uaddr = uaddr;
@@ -180,6 +191,9 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 err:
 	for (page_index = 0; page_index < ret; page_index++)
 		put_page(pages[page_index]);
+
+	// DEBUG_DEC_VAL(profile, uaddr_to_kaddr_used, ksize(pages));
+
 	kfree(pages);
 
 	return allocated_mem;
@@ -276,6 +290,9 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 {
 	struct sbpf_alloc_kmem *aux_page;
 	off_t offset;
+	// #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	// 	struct profile_t *profile = &current->sbpf->profile;
+	// #endif
 
 	sbpf->page_fault.prog = prog;
 	bpf_prog_inc(prog);
@@ -283,6 +300,10 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
 	sbpf->page_fault.sbpf_mm->user_shared_pages =
 		kmalloc(sizeof(struct radix_tree_root), GFP_KERNEL);
+
+	// DEBUG_INC_VAL(profile, sbpf_init_used, ksize(sbpf->page_fault.sbpf_mm));
+	// DEBUG_CMP_INC_VAL(profile, sbpf_init_max, sbpf_init_used);
+
 	sbpf->page_fault.sbpf_mm->parent = NULL;
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
 	INIT_RADIX_TREE(sbpf->page_fault.sbpf_mm->user_shared_pages, GFP_KERNEL);
@@ -304,8 +325,15 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 static int init_sbpf_function(struct sbpf_task *sbpf, const union bpf_attr *attr,
 			      struct bpf_prog *prog)
 {
+	// #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	// 	struct profile_t *profile = &current->sbpf->profile;
+	// #endif
 	sbpf->sbpf_func.prog = prog;
 	sbpf->sbpf_func.arg = kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
+
+	// DEBUG_INC_VAL(profile, sbpf_init_used, ksize(sbpf->sbpf_func.arg));
+	// DEBUG_CMP_INC_VAL(profile, sbpf_init_max, sbpf_init_used);
+
 	bpf_prog_inc(prog);
 
 	return 0;
@@ -317,11 +345,17 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	struct bpf_sbpf_link *link;
 	struct sbpf_task *sbpf;
 	int err;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile;
+#endif
 
 	if (!current->sbpf)
 		return -EINVAL;
 
 	sbpf = current->sbpf;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	profile = &sbpf->profile;
+#endif
 
 	if (attr->link_create.attach_type == BPF_SBPF_PAGE_FAULT) {
 		init_sbpf_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
@@ -334,10 +368,16 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		err = -ENOMEM;
 		goto out_sbpf;
 	}
+
+	// DEBUG_INC_VAL(profile, sbpf_init_used, ksize(link));
+	// DEBUG_CMP_INC_VAL(profile, sbpf_init_max, sbpf_init_used);
+
 	bpf_link_init(&link->link, BPF_LINK_TYPE_SBPF, &bpf_sbpf_link_ops, prog);
 	link->type = attr->link_create.attach_type;
 	err = bpf_link_prime(&link->link, &link_primer);
 	if (err) {
+		// DEBUG_DEC_VAL(profile, sbpf_init_used, ksize(link));
+
 		kfree(link);
 		goto out_sbpf;
 	}
@@ -374,6 +414,8 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 	if (!atomic_dec_and_test(&sbpf->ref)) {
 		if (sbpf->sbpf_func.prog) {
 			bpf_prog_put(sbpf->sbpf_func.prog);
+
+			// DEBUG_DEC_VAL(profile, sbpf_init_used, ksize(sbpf->sbpf_func.arg));
 			kfree(sbpf->sbpf_func.arg);
 		}
 
@@ -381,6 +423,8 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 			release_sbpf_mm_struct(tsk, sbpf->page_fault.sbpf_mm);
 			bpf_prog_put(sbpf->page_fault.prog);
 		}
+
+		// DEBUG_DEC_VAL(profile, sbpf_init_used, ksize(sbpf));
 
 		kfree(sbpf);
 	}
@@ -407,6 +451,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	struct radix_tree_iter iter;
 	struct sbpf_alloc_kmem *alloc_kmem;
 	void __rcu **slot;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile;
+#endif
 
 	if (current->sbpf == NULL) {
 		tsk->sbpf = NULL;
@@ -416,6 +463,12 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	old_sbpf = current->sbpf;
 	write_lock(&old_sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 	tsk->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	profile = &old_sbpf->profile;
+#endif
+
+	// DEBUG_INC_VAL(profile, sbpf_init_used, ksize(tsk->sbpf));
+	// DEBUG_CMP_INC_VAL(profile, sbpf_init_max, sbpf_init_used);
 
 	/* Initialize the sbpf_mm struct. */
 	if (old_sbpf->page_fault.prog != NULL) {
@@ -475,10 +528,21 @@ const struct bpf_prog_ops sbpf_prog_ops = {};
 
 int bpf_prog_load_sbpf(struct bpf_prog *prog)
 {
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	struct profile_t *profile;
+#endif
+
 	if (current->sbpf)
 		return 0;
 
 	current->sbpf = kmalloc(sizeof(struct sbpf_task), GFP_KERNEL);
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	profile = &current->sbpf->profile;
+#endif
+
+	// DEBUG_INC_VAL(profile, sbpf_init_used, ksize(current->sbpf));
+	// DEBUG_CMP_INC_VAL(profile, sbpf_init_max, sbpf_init_used);
+
 	if (current->sbpf == NULL)
 		return -ENOMEM;
 
@@ -492,3 +556,34 @@ void exit_sbpf(struct task_struct *tsk)
 
 	release_sbpf(tsk, tsk->sbpf);
 }
+
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+void print_debug_info(struct task_struct *tsk)
+{
+	struct profile_t *debug;
+	char process_name[TASK_COMM_LEN];
+
+	if (!tsk->sbpf) {
+		return;
+	}
+
+	debug = &tsk->sbpf->profile;
+
+	if (debug == NULL) {
+		printk("NULL ptr in debug_info\n");
+		return;
+	}
+
+	get_task_comm(process_name, tsk);
+
+	printk("--------------------DEBUG INFO--------------------\n");
+	printk("PID: %d, NAME: %s\n", task_pid_nr(tsk), process_name);
+	printk("--------------------------------------------------\n");
+	printk("%-30s %s\n", "ELEMENT", "COUNT");
+	printk("%-30s %lld\n", "reverse_insert_count", debug->reverse_insert_count);
+	printk("%-30s %lld\n", "reverse_remove_count", debug->reverse_remove_count);
+	printk("%-30s 0x%llx\n", "reverse_used", debug->reverse_used);
+	printk("%-30s 0x%llx\n", "reverse_max", debug->reverse_max);
+	printk("\n");
+}
+#endif
