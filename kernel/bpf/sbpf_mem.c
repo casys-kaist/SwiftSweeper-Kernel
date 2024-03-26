@@ -213,14 +213,21 @@ static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 struct set_pte_aux {
 	pte_t *entry;
 	bool update_pmd;
+	bool replace_entry;
 };
 
 static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 {
 	struct folio *folio;
 	struct set_pte_aux *aux = aux_;
+	pte_t entry;
 
-	pte_t entry = *(aux->entry);
+	if ((!aux->replace_entry) && unlikely(!pte_none(*pte))) {
+		printk("mbpf: set pte with non empty page table entry 0x%lx\n", addr);
+		return -EINVAL;
+	}
+
+	entry = *(aux->entry);
 	folio = page_folio(pte_page(entry));
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
@@ -283,6 +290,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 	aux.entry = &entry;
 	aux.update_pmd = false;
+	aux.replace_entry = true;
 #ifdef USE_MAPLE_TREE
 	mas.tree = folio->page.sbpf_reverse->mt;
 	mas_for_each(&mas, smap, ULONG_MAX)
@@ -291,7 +299,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 			continue;
 		ret = walk_page_table_pte_range(current->mm, mas.index & PAGE_MASK,
 						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_pte, &entry, false);
+						__set_pte, &aux, false);
 		if (unlikely(ret)) {
 			printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n", ret,
 			       s mas.index, mas.last);
@@ -365,6 +373,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 			entry = pte_mkwrite(entry);
 			aux.entry = &entry;
 			aux.update_pmd = true;
+			aux.replace_entry = false;
 
 			if (paddr != vaddr) {
 				ret = touch_page_table_pte_range(current->mm, paddr,
@@ -395,6 +404,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		folio = page_folio(pte_page(entry));
 		aux.entry = &entry;
 		aux.update_pmd = true;
+		aux.replace_entry = false;
 
 		if (unlikely(folio->page.sbpf_reverse == NULL)) {
 			printk("mbpf: invalid remapping request without BPF_MBPF mmap flags 0x%lx\n",
