@@ -7,7 +7,7 @@
 
 #include "sbpf_mem.h"
 
-#ifdef USE_MAPLE_TREE
+#ifdef BUD_REVERSE_USE_MAPLE_TREE
 void *sbpf_reverse_init(unsigned long paddr)
 {
 	struct sbpf_reverse_map *map =
@@ -85,7 +85,6 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 		       (unsigned long)entry);
 	}
 }
-
 #else
 static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long start,
 								  unsigned long end)
@@ -102,6 +101,7 @@ static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long 
 	DEBUG_INC_COUNT(profile, reverse_insert_count);
 	DEBUG_INC_VAL(profile, reverse_used, ksize(map_elem));
 	DEBUG_CMP_INC_VAL(profile, reverse_max, reverse_used);
+
 	return map_elem;
 }
 
@@ -284,7 +284,7 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 
 int sbpf_reverse_empty(struct sbpf_reverse_map *map)
 {
-	if (map == NULL || list_empty(&map->elem)) {
+	if (map == NULL || map->size == 0 || list_empty(&map->elem)) {
 		return 1;
 	}
 

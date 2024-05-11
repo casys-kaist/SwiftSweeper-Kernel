@@ -249,11 +249,10 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 {
 	unsigned long paddr;
 	struct folio *folio;
-	size_t cnt = 0;
 	int ret;
 	pte_t entry;
 	struct set_pte_aux aux;
-#ifdef USE_MAPLE_TREE
+#ifdef BUD_REVERSE_USE_MAPLE_TREE
 	struct sbpf_reverse_map *smap;
 	MA_STATE(mas, NULL, 0, 0);
 #else
@@ -295,7 +294,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 		aux.entry = &entry;
 		aux.update_pmd = false;
-#ifdef USE_MAPLE_TREE
+#ifdef BUD_REVERSE_USE_MAPLE_TREE
 		mas.tree = folio->page.sbpf_reverse->mt;
 		mas_for_each(&mas, smap, ULONG_MAX)
 		{
@@ -303,16 +302,15 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 				continue;
 			ret = walk_page_table_pte_range(
 				current->mm, mas.index & PAGE_MASK,
-				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_pte, &aux,
+				(mas.last & PAGE_MASK) + PAGE_SIZE, __update_pte, &aux,
 				false);
 			if (unlikely(ret)) {
 				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
-				       ret, s mas.index, mas.last);
+				       ret, mas.index, mas.last);
 			}
 		}
 #else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
-			cnt += (cur->end - cur->start) / PAGE_SIZE;
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
 							__update_pte, &aux, false);
 			if (unlikely(ret)) {
@@ -327,8 +325,23 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		folio_put_refs(orig_folio, folio_ref_count(folio));
 	} else {
 		folio = orig_folio;
+#ifdef BUD_REVERSE_USE_MAPLE_TREE
+		mas.tree = folio->page.sbpf_reverse->mt;
+		mas_for_each(&mas, smap, ULONG_MAX)
+		{
+			if (smap == NULL)
+				continue;
+			ret = walk_page_table_pte_range(
+				current->mm, mas.index & PAGE_MASK,
+				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_write, &aux,
+				false);
+			if (unlikely(ret)) {
+				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
+				       ret, mas.index, mas.last);
+			}
+		}
+#else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
-			cnt += (cur->end - cur->start) / PAGE_SIZE;
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
 							__set_write, &aux, false);
 			if (unlikely(ret)) {
@@ -337,6 +350,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 				return ERR_PTR(ret);
 			}
 		}
+#endif
 	}
 
 	return folio;
@@ -548,6 +562,44 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	return ret;
 }
 
+static int __unset_pte_single(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
+{
+	struct folio *folio;
+	struct page *pmd_page;
+	int ret = SBPF_PTE_WALK_STOP;
+
+	folio = page_folio(pte_page(*pte));
+	// Temporary check the pte is mBPF folio by checking the reverse mapping exists.
+	if (!folio || !folio->page.sbpf_reverse)
+		return 0;
+	if (!(pte_flags(*pte) & _PAGE_RW)) {
+		// TODO! Optimize, If the folio will be droped, we don't have to do copy-on-write.
+		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+		if (IS_ERR_OR_NULL(folio)) {
+			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+			       addr);
+			return -EINVAL;
+		}
+	}
+
+	atomic_dec(&folio->_mapcount);
+	pte_clear(current->mm, addr, pte);
+	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
+
+	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
+		pmd_page = pmd_pgtable(*pmd);
+		pmd_clear(pmd);
+		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
+		mm_dec_nr_ptes(current->sbpf->tlb->mm);
+		pte_free(current->mm, pmd_page);
+	}
+
+	ret = unset_trie_entry(addr, addr + PAGE_SIZE, folio);
+	folio_put(folio);
+
+	return ret;
+}
+
 static int bpf_unset_pte(unsigned long address, size_t len)
 {
 	struct mm_struct *mm = current->mm;
@@ -555,14 +607,21 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	int ret = 0;
 
 	address = address & PAGE_MASK;
-	aux.folio = NULL;
 
-	aux.end_addr = address + len;
-	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux,
-					true);
-	if (aux.folio && likely(!ret)) {
-		ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
-		folio_put_refs(aux.folio, (aux.end_addr - aux.start_addr) / PAGE_SIZE);
+	if (len == PAGE_SIZE) {
+		ret = walk_page_table_pte_range(mm, address, address + len,
+						__unset_pte_single, NULL, true);
+	} else {
+		aux.folio = NULL;
+		aux.end_addr = address + len;
+
+		ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte,
+						&aux, true);
+		if (aux.folio && likely(!ret)) {
+			ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
+			folio_put_refs(aux.folio,
+				       (aux.end_addr - aux.start_addr) / PAGE_SIZE);
+		}
 	}
 
 	if (unlikely(ret)) {

@@ -8,7 +8,8 @@
 
 #define TRI_SIZE 512
 
-// #define USE_MAPLE_TREE 1
+// #define BUD_REVERSE_USE_MAPLE_TREE 1
+#define BUD_REVERSE_USE_LINKED_LIST 1
 
 /* struct sbpf_reverse_map: [start , end) */
 struct sbpf_reverse_map_elem {
@@ -20,7 +21,7 @@ struct sbpf_reverse_map_elem {
 struct sbpf_reverse_map {
 	unsigned long paddr;
 	size_t size;
-#ifdef USE_MAPLE_TREE
+#ifdef BUD_REVERSE_USE_MAPLE_TREE
 	struct maple_tree *mt;
 #else
 	struct list_head elem;

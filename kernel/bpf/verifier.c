@@ -11013,6 +11013,12 @@ static int retrieve_ptr_limit(const struct bpf_reg_state *ptr_reg,
 			     ptr_reg->smin_value :
 			     ptr_reg->umax_value) + ptr_reg->off;
 		break;
+	case PTR_TO_MEM:
+		max = ptr_reg->mem_size;
+		ptr_limit = (mask_to_left ?
+			     ptr_reg->smin_value :
+			     ptr_reg->umax_value) + ptr_reg->off;
+		break;
 	default:
 		return REASON_TYPE;
 	}
