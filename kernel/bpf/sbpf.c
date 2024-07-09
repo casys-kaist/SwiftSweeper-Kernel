@@ -15,6 +15,7 @@
 
 #include "sbpf_mem.h"
 
+/* This function is called when BUDAlloc manually execute the eBPF program for the page table modification. */
 int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 {
 	int ret = -EINVAL;
@@ -40,6 +41,10 @@ done:
 	return ret;
 }
 
+/** 
+* This function is check the page fault and call copy on write function.
+* If the page fault is not faulted by the copy on write, it returns STOP.
+*/
 static int __handle_page_fault(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct folio *orig_folio = page_folio(pte_page(*pte));
@@ -56,20 +61,26 @@ static int __handle_page_fault(pmd_t *pmd, pte_t *pte, unsigned long addr, void 
 	return SBPF_PTE_WALK_STOP;
 }
 
+/* This function is called when a page fault occurs in the predefined BUDAlloc range. */
 int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
-
 			   unsigned int flags)
 {
 	unsigned long vaddr = fault_addr & PAGE_MASK;
 	struct sbpf_vm_fault sbpf_fault;
-	int ret;
 	struct mmu_gather tlb;
+	int ret = 0;
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
 	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (flags & FAULT_FLAG_WRITE) {
-		spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+		// If the other thread is accessing the same page, we could return
+		// to reduce the contention points.
+		if (!spin_trylock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock))
+			goto done;
+
+		// Walk the page table and call the page fault function.
+		// __handle_page_fault do copy_on_write.
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
 						__handle_page_fault, sbpf, false);
 		if (!ret) {
@@ -88,6 +99,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 
 	// Call page fault function.
 	ret = current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
+	// Have to manually update the resident set size for the page fault.
 	update_hiwater_rss(current->mm);
 
 	tlb_finish_mmu(&tlb);
@@ -480,7 +492,6 @@ const struct bpf_prog_ops sbpf_prog_ops = {};
 
 int bpf_prog_load_sbpf(struct bpf_prog *prog)
 {
-
 	if (current->sbpf)
 		return 0;
 

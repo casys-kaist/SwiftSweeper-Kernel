@@ -20,6 +20,11 @@
 
 #include "sbpf_mem.h"
 
+/**
+ * walk the page table range from the [start, end) 
+ * continue_walk: if true, continue to walk the page table even if there exists hole in the page table.
+ * negative value means the error code.
+ */
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 			      unsigned long end, pte_func func, void *aux,
 			      bool continue_walk)
@@ -105,6 +110,15 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	return 0;
 }
 
+/**
+* Unlike walk_page_table(), this function touches each PTE in the given range
+* and calls the provided function 'func' for each PTE.
+* The 'func' is expected to return one of the following values:
+* SBPF_PTE_WALK_NEXT_PTE: Continue to the next PTE.
+* SBPF_PTE_WALK_NEXT_PMD: Skip to the next PMD.
+* SBPF_PTE_WALK_STOP: Stop the iteration.
+* Negative value: Return the value as an error code.
+*/
 int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 			       unsigned long end, pte_func func, void *aux)
 {
@@ -215,6 +229,19 @@ struct set_pte_aux {
 	bool update_pmd;
 };
 
+static int __set_write(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
+{
+	struct folio *folio;
+	struct set_pte_aux *aux = aux_;
+
+	// This function doesn't require TLB flush, because the page is soley mapped.
+	pte_t entry = *(aux->entry);
+	folio = page_folio(pte_page(entry));
+	set_pte_at(current->mm, addr, pte, entry);
+
+	return SBPF_PTE_WALK_NEXT_PTE;
+}
+
 static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 {
 	struct folio *folio;
@@ -233,6 +260,14 @@ static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
+/**
+ * Copy-on-write function for the orig_folio.
+ * This function performs copy-on-write operation on the orig_folio,
+ * creating a new folio if necessary and updating the necessary metadata.
+ *
+ * @param orig_folio The original folio to perform copy-on-write on.
+ * @return The new folio after the copy-on-write operation.
+ */
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio)
 {
 	unsigned long paddr;
@@ -274,51 +309,92 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
+
+		aux.entry = &entry;
+		aux.update_pmd = false;
+#ifdef USE_MAPLE_TREE
+		mas.tree = folio->page.sbpf_reverse->mt;
+		mas_for_each(&mas, smap, ULONG_MAX)
+		{
+			if (smap == NULL)
+				continue;
+			ret = walk_page_table_pte_range(
+				current->mm, mas.index & PAGE_MASK,
+				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_pte, &entry,
+				false);
+			if (unlikely(ret)) {
+				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
+				       ret, s mas.index, mas.last);
+			}
+		}
+#else
+		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
+			cnt += (cur->end - cur->start) / PAGE_SIZE;
+			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
+							__set_pte, &aux, false);
+			if (unlikely(ret)) {
+				printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n",
+				       ret, cur->start, cur->end);
+				return ERR_PTR(ret);
+			}
+		}
+#endif
+		folio_put(folio);
+		atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
+		folio_put_refs(orig_folio, folio_ref_count(folio));
 	} else {
 		folio = orig_folio;
 		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 		entry = pte_sw_mkyoung(entry);
 		entry = pte_mkwrite(entry);
-	}
-
-	aux.entry = &entry;
-	aux.update_pmd = false;
+		aux.entry = &entry;
+		aux.update_pmd = false;
 #ifdef USE_MAPLE_TREE
-	mas.tree = folio->page.sbpf_reverse->mt;
-	mas_for_each(&mas, smap, ULONG_MAX)
-	{
-		if (smap == NULL)
-			continue;
-		ret = walk_page_table_pte_range(current->mm, mas.index & PAGE_MASK,
-						(mas.last & PAGE_MASK) + PAGE_SIZE,
-						__set_pte, &entry, false);
-		if (unlikely(ret)) {
-			printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n", ret,
-			       s mas.index, mas.last);
+		mas.tree = folio->page.sbpf_reverse->mt;
+		mas_for_each(&mas, smap, ULONG_MAX)
+		{
+			if (smap == NULL)
+				continue;
+			ret = walk_page_table_pte_range(
+				current->mm, mas.index & PAGE_MASK,
+				(mas.last & PAGE_MASK) + PAGE_SIZE, __set_write, NULL,
+				false);
+			if (unlikely(ret)) {
+				printk("Error in set addr range (%d): [0x%lx, 0x%lx)\n",
+				       ret, s mas.index, mas.last);
+			}
 		}
-	}
 #else
-	list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
-		cnt += (cur->end - cur->start) / PAGE_SIZE;
-		ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-						__set_pte, &aux, false);
-		if (unlikely(ret)) {
-			printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n", ret,
-			       cur->start, cur->end);
-			return ERR_PTR(ret);
+		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
+			cnt += (cur->end - cur->start) / PAGE_SIZE;
+			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
+							__set_write, &aux, false);
+			if (unlikely(ret)) {
+				printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n",
+				       ret, cur->start, cur->end);
+				return ERR_PTR(ret);
+			}
 		}
-	}
 #endif
-	if (folio != orig_folio) {
-		folio_put(folio);
-		atomic_sub(folio_ref_count(folio), &orig_folio->_mapcount);
-		folio_put_refs(orig_folio, folio_ref_count(folio));
 	}
 
 	return folio;
 }
 
-// If paddr is 0, kernel allocates the memory.
+/**
+ * Set the page table entry (PTE) for a given virtual address.
+ *
+ * @vaddr: The virtual address for which the PTE needs to be set.
+ * @len: The length of the memory region to be mapped [vaddr, vaddr + len).
+ * @paddr: The pseudo-physical address to be mapped to the virtual address. 
+ * If the value is 0, then the virtual address is used as the physical address, i.e., Idential mapping.
+ * @vmf_flags: The flags for the virtual memory region.
+ * @prot: The protection flags for the virtual memory region.
+ *
+ * This function sets the page table entry (PTE) for the specified virtual address
+ * to the provided value. The PTE determines the attributes and physical address
+ * mapping for the given virtual address in the page table.
+ */
 static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 		       unsigned long vmf_flags, unsigned long prot)
 {
@@ -454,6 +530,46 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 	return 0;
 }
 
+static int __unset_pte_single(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
+{
+	struct folio *folio;
+	struct page *pmd_page;
+	int ret = SBPF_PTE_WALK_STOP;
+
+	folio = page_folio(pte_page(*pte));
+	// Temporary check the pte is mBPF folio by checking the reverse mapping exists.
+	if (!folio || !folio->page.sbpf_reverse)
+		return 0;
+
+	// If the folio is shared, we have to copy the page before remove (folio).
+	if ((!(pte_flags(*pte) & _PAGE_RW)) &&
+	    folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
+		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+		if (IS_ERR_OR_NULL(folio)) {
+			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+			       addr);
+			return -EINVAL;
+		}
+	}
+
+	atomic_dec(&folio->_mapcount);
+	pte_clear(current->mm, addr, pte);
+	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
+
+	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
+		pmd_page = pmd_pgtable(*pmd);
+		pmd_clear(pmd);
+		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
+		mm_dec_nr_ptes(current->sbpf->tlb->mm);
+		pte_free(current->mm, pmd_page);
+	}
+
+	ret = unset_trie_entry(addr, addr + PAGE_SIZE, folio);
+	folio_put(folio);
+
+	return ret;
+}
+
 static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 {
 	struct folio *folio;
@@ -465,8 +581,10 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	// Temporary check the pte is mBPF folio by checking the reverse mapping exists.
 	if (!folio || !folio->page.sbpf_reverse)
 		return 0;
-	if (!(pte_flags(*pte) & _PAGE_RW)) {
-		// TODO! Optimize, If the folio will be droped, we don't have to do copy-on-write.
+
+	// If the folio is shared, we have to copy the page before remove (folio).
+	if ((!(pte_flags(*pte) & _PAGE_RW)) &&
+	    folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
 		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
 		if (IS_ERR_OR_NULL(folio)) {
 			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
@@ -523,21 +641,37 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	return ret;
 }
 
+/**
+ * Unset the page table entry (PTE) for a given virtual address.
+ *
+ * @addr: The virtual address for which the PTE needs to be unset.
+ * @len: The length of the memory region to be unmapped [addr, addr + len).
+ *
+ * This function unsets the page table entry (PTE) for the specified virtual address.
+ * It is used to remove the mapping between the virtual address and the physical page frame.
+ */
 static int bpf_unset_pte(unsigned long address, size_t len)
 {
 	struct mm_struct *mm = current->mm;
 	struct unset_pte_aux aux;
 	int ret = 0;
 
-	address = address & PAGE_MASK;
-	aux.folio = NULL;
+	if (len == 0)
+		return 0;
 
-	aux.end_addr = address + len;
-	ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte, &aux,
-					true);
-	if (aux.folio && likely(!ret)) {
-		ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
-		folio_put_refs(aux.folio, (aux.end_addr - aux.start_addr) / PAGE_SIZE);
+	address = address & PAGE_MASK;
+	if (len == PAGE_SIZE) {
+		ret = walk_page_table_pte_range(mm, address, address + len,
+						__unset_pte_single, NULL, true);
+	} else {
+		aux.folio = NULL;
+		ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte,
+						&aux, true);
+		if (aux.folio && likely(!ret)) {
+			ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
+			folio_put_refs(aux.folio,
+				       (aux.end_addr - aux.start_addr) / PAGE_SIZE);
+		}
 	}
 
 	if (unlikely(ret)) {
@@ -661,6 +795,18 @@ const struct bpf_func_proto bpf_unset_page_table_proto = {
 	.ret_type = RET_INTEGER,
 };
 
+/**
+ * Touches the page table entry for the given address
+ * @vaddr: The virtual address for which the PTE needs to be set.
+ * @len: The length of the memory region to be mapped [vaddr, vaddr + len).
+ * @paddr: Not used. Reserved for the future usages.
+ * @vmf_flags: The flags for the virtual memory region.
+ * @prot: The protection flags for the virtual memory region.
+ *
+ * This function touches the page table entry for the given address and sets the
+ * specified flags. It ensures that the page table entry is present in the
+ * page table hierarchy and updates the flags accordingly.
+ */
 BPF_CALL_5(bpf_touch_page_table, unsigned long, vaddr, size_t, len, unsigned long, paddr,
 	   unsigned long, vmf_flags, unsigned long, prot)
 {

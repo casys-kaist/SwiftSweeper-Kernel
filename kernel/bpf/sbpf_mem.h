@@ -8,19 +8,22 @@
 
 #define TRI_SIZE 512
 
+/* MAP TREE is more stable than the linked list, but requires more space and time. */
 // #define BUD_REVERSE_USE_MAPLE_TREE 1
 #define BUD_REVERSE_USE_LINKED_LIST 1
 
-/* struct sbpf_reverse_map: [start , end) */
 struct sbpf_reverse_map_elem {
 	unsigned long start;
 	unsigned long end;
 	struct list_head list;
 };
 
+/* Holds the reverse map information for the BUDAlloc
+ * The reverse map is used to track the folio to virtual addresses for replacing the Linux object-based reverse map.
+ */
 struct sbpf_reverse_map {
-	unsigned long paddr;
-	size_t size;
+	unsigned long paddr; // Physical address of the memory region
+	size_t size; // Size of the memory region
 #ifdef BUD_REVERSE_USE_MAPLE_TREE
 	struct maple_tree *mt;
 #else
@@ -29,14 +32,16 @@ struct sbpf_reverse_map {
 #endif
 };
 
+/* Holds the metadata for the BUDAlloc per user threads */
 struct sbpf_mm_struct {
-	struct radix_tree_root *user_shared_pages;
-	rwlock_t user_shared_pages_lock;
+	struct radix_tree_root *
+		user_shared_pages; // Cache for the user address to kernel address mapping
+	rwlock_t user_shared_pages_lock; // Lock used for the user address to kernel address mapping
 	struct sbpf_mm_struct *parent;
 	struct list_head children;
 	struct list_head elem;
-	atomic_t refcnt;
-	spinlock_t pgtable_lock;
+	atomic_t refcnt; // Reference count for the sbpf_mm_struct
+	spinlock_t pgtable_lock; // Lock used for protecting concurrent page table accesses
 };
 
 struct trie_node {
@@ -46,12 +51,14 @@ struct trie_node {
 	};
 };
 
+/* BUDAlloc page table walking states. These enums are used for APIs for page table management such as walk_page_table_pte_range. */
 enum sbpf_pte_walk {
 	SBPF_PTE_WALK_NEXT_PTE,
 	SBPF_PTE_WALK_NEXT_PMD,
 	SBPF_PTE_WALK_STOP,
 };
 
+/* BUDAlloc helper function prototypes */
 typedef int (*pte_func)(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux);
 
 extern const struct bpf_func_proto bpf_set_page_table_proto;
