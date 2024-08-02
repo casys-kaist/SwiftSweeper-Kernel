@@ -163,8 +163,10 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	// Todo: Optimize this entry to trie
 	cur = radix_tree_lookup(current->sbpf->page_fault.sbpf_mm->user_shared_pages,
 				((unsigned long)uaddr));
-	if (cur)
+	if (cur && cur->nr_pages * PAGE_SIZE > len + offset)
 		return cur;
+	else
+		allocated_mem = cur;
 
 	len = PAGE_ALIGN(len + offset);
 	nr_pages = len / PAGE_SIZE;
@@ -178,9 +180,11 @@ struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 
 	kaddr = vmap(pages, nr_pages, VM_MAP, PAGE_KERNEL);
 
-	allocated_mem = kmalloc(sizeof(struct sbpf_alloc_kmem), GFP_KERNEL);
-	if (!allocated_mem)
-		goto err;
+	if (!allocated_mem) {
+		allocated_mem = kmalloc(sizeof(struct sbpf_alloc_kmem), GFP_KERNEL);
+		if (!allocated_mem)
+			goto err;
+	}
 
 	allocated_mem->nr_pages = nr_pages;
 	allocated_mem->kaddr = kaddr;
