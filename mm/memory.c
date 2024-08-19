@@ -5253,9 +5253,9 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 	lru_gen_enter_fault(vma);
 
 #ifdef CONFIG_BPF_SBPF
-	if (vma->vm_flags & VM_MBPF) {
+	if (vma->vm_flags & VM_MBPF || flags & FAULT_FLAG_SBPF_EXEC) {
 		if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
-			ret = sbpf_handle_page_fault(current->sbpf, address, flags);
+			ret = sbpf_handle_page_fault(current->sbpf, vma, address, flags);
 			if (ret)
 				ret = VM_FAULT_SIGSEGV;
 		} else {

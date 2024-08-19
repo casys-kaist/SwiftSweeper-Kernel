@@ -8733,6 +8733,7 @@ static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("netfilter",		NETFILTER, 0, SEC_NONE),
 	SEC_DEF("sbpf/function",		SBPF, BPF_SBPF_FUNCTION, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
 	SEC_DEF("sbpf/page_fault",		SBPF, BPF_SBPF_PAGE_FAULT, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
+	SEC_DEF("sbpf/wp_page_fault",		SBPF, BPF_SBPF_WP_PAGE_FAULT, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
 };
 
 static size_t custom_sec_def_cnt;
@@ -10650,7 +10651,7 @@ struct bpf_link *bpf_program__attach_sbpf(const struct bpf_program *prog, const 
 
 	attach_type = bpf_program__expected_attach_type(prog);
 
-	if (attach_type == BPF_SBPF_PAGE_FAULT) {
+	if (attach_type == BPF_SBPF_PAGE_FAULT || attach_type == BPF_SBPF_WP_PAGE_FAULT) {
 		link_create_opts.sbpf.aux_ptr = prog->aux_ptr;
 		link_create_opts.sbpf.aux_len = prog->aux_len;
 	}

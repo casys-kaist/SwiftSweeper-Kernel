@@ -62,8 +62,8 @@ static int __handle_page_fault(pmd_t *pmd, pte_t *pte, unsigned long addr, void 
 }
 
 /* This function is called when a page fault occurs in the predefined BUDAlloc range. */
-int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
-			   unsigned int flags)
+int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
+			   unsigned long fault_addr, unsigned int flags)
 {
 	unsigned long vaddr = fault_addr & PAGE_MASK;
 	struct sbpf_vm_fault sbpf_fault;
@@ -73,7 +73,25 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	current->sbpf->tlb = &tlb;
 	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
-	if (flags & FAULT_FLAG_WRITE) {
+	if (flags & FAULT_FLAG_SBPF_EXEC) {
+		if (sbpf->wp_page_fault.prog) {
+			// If the other thread is accessing the same page, we could return
+			// to reduce the contention points.
+			sbpf_fault.vaddr = fault_addr;
+			sbpf_fault.flags = flags;
+			sbpf_fault.len = PAGE_SIZE;
+			sbpf_fault.aux = sbpf->wp_page_fault.aux;
+
+			// Call page fault function.
+			ret = sbpf->wp_page_fault.prog->bpf_func(&sbpf_fault, NULL);
+
+			tlb_finish_mmu(&tlb);
+			current->sbpf->tlb = NULL;
+			goto done;
+		}
+		ret = -EINVAL;
+		goto done;
+	} else if (flags & FAULT_FLAG_WRITE) {
 		// If the other thread is accessing the same page, we could return
 		// to reduce the contention points.
 		if (!spin_trylock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock))
@@ -83,10 +101,22 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 		// __handle_page_fault do copy_on_write.
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
 						__handle_page_fault, sbpf, false);
+
+		// Sucessfully copy on write.
 		if (!ret) {
+			spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+			if (sbpf->wp_page_fault.prog) {
+				sbpf_fault.vaddr = fault_addr;
+				sbpf_fault.flags = flags;
+				sbpf_fault.len = PAGE_SIZE;
+				sbpf_fault.aux = sbpf->wp_page_fault.aux;
+
+				// Call page fault function.
+				ret = sbpf->wp_page_fault.prog->bpf_func(&sbpf_fault,
+									 NULL);
+			}
 			tlb_finish_mmu(&tlb);
 			current->sbpf->tlb = NULL;
-			spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 			goto done;
 		}
 		spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
@@ -95,7 +125,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, unsigned long fault_addr,
 	sbpf_fault.vaddr = fault_addr;
 	sbpf_fault.flags = flags;
 	sbpf_fault.len = PAGE_SIZE;
-	sbpf_fault.aux = current->sbpf->page_fault.aux;
+	sbpf_fault.aux = sbpf->page_fault.aux;
 
 	// Call page fault function.
 	ret = current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
@@ -319,11 +349,30 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	return 0;
 }
 
-static int init_sbpf_function(struct sbpf_task *sbpf, const union bpf_attr *attr,
-			      struct bpf_prog *prog)
+static int init_sbpf_function(struct sbpf_task *sbpf, struct bpf_prog *prog)
 {
 	sbpf->sbpf_func.prog = prog;
 	sbpf->sbpf_func.arg = kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
+
+	bpf_prog_inc(prog);
+
+	return 0;
+}
+
+static int init_sbpf_wp_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
+				   struct bpf_prog *prog)
+{
+	struct sbpf_alloc_kmem *aux_page;
+	off_t offset;
+
+	sbpf->wp_page_fault.prog = prog;
+	if (aux_ptr) {
+		aux_page = uaddr_to_kaddr(aux_ptr, PAGE_SIZE);
+		offset = aux_ptr - aux_page->uaddr;
+		sbpf->wp_page_fault.aux = aux_page->uaddr + offset;
+	} else {
+		sbpf->wp_page_fault.aux = NULL;
+	}
 
 	bpf_prog_inc(prog);
 
@@ -345,7 +394,11 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	if (attr->link_create.attach_type == BPF_SBPF_PAGE_FAULT) {
 		init_sbpf_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
-		init_sbpf_function(sbpf, attr, prog);
+		init_sbpf_function(sbpf, prog);
+	} else if (attr->link_create.attach_type == BPF_SBPF_WP_PAGE_FAULT) {
+		init_sbpf_wp_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
+	} else {
+		return -EINVAL;
 	}
 
 	link = kzalloc(sizeof(*link), GFP_USER);
@@ -369,8 +422,7 @@ out_sbpf:
 	return err;
 }
 
-static void release_sbpf_mm_struct(struct task_struct *tsk,
-				   struct sbpf_mm_struct *sbpf_mm)
+static void release_sbpf_mm(struct task_struct *tsk, struct sbpf_mm_struct *sbpf_mm)
 {
 	struct sbpf_alloc_kmem *alloc_kmem;
 	struct radix_tree_iter iter;
@@ -394,15 +446,17 @@ static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 	if (!atomic_dec_and_test(&sbpf->ref)) {
 		if (sbpf->sbpf_func.prog) {
 			bpf_prog_put(sbpf->sbpf_func.prog);
+		}
 
-			kfree(sbpf->sbpf_func.arg);
+		if (sbpf->wp_page_fault.prog) {
+			bpf_prog_put(sbpf->wp_page_fault.prog);
 		}
 
 		if (sbpf->page_fault.prog) {
-			release_sbpf_mm_struct(tsk, sbpf->page_fault.sbpf_mm);
 			bpf_prog_put(sbpf->page_fault.prog);
 		}
 
+		release_sbpf_mm(tsk, sbpf->page_fault.sbpf_mm);
 		kfree(sbpf);
 	}
 }
@@ -456,9 +510,16 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 		}
 	}
 
-	if (current->sbpf->sbpf_func.prog != NULL) {
-		init_sbpf_function(tsk->sbpf, NULL, old_sbpf->sbpf_func.prog);
+	if (old_sbpf->sbpf_func.prog != NULL) {
+		init_sbpf_function(tsk->sbpf, old_sbpf->sbpf_func.prog);
 		memcpy(tsk->sbpf->sbpf_func.arg, old_sbpf->sbpf_func.arg, PAGE_SIZE);
+	}
+
+	if (old_sbpf->wp_page_fault.prog != NULL) {
+		init_sbpf_wp_page_fault(tsk->sbpf, old_sbpf->wp_page_fault.aux,
+					old_sbpf->wp_page_fault.prog);
+		memcpy(tsk->sbpf->wp_page_fault.aux, old_sbpf->wp_page_fault.aux,
+		       PAGE_SIZE);
 	}
 
 	// We have to clean up user shared pages in case of fork.

@@ -3507,6 +3507,8 @@ attach_type_to_prog_type(enum bpf_attach_type attach_type)
 		return BPF_PROG_TYPE_SBPF;
 	case BPF_SBPF_PAGE_FAULT:
 		return BPF_PROG_TYPE_SBPF;
+	case BPF_SBPF_WP_PAGE_FAULT:
+		return BPF_PROG_TYPE_SBPF;
 	default:
 		return BPF_PROG_TYPE_UNSPEC;
 	}

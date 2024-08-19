@@ -1047,6 +1047,7 @@ enum bpf_attach_type {
 	BPF_STRUCT_OPS,
 	BPF_SBPF_FUNCTION,
 	BPF_SBPF_PAGE_FAULT,
+	BPF_SBPF_WP_PAGE_FAULT,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -7235,13 +7236,10 @@ struct bpf_iter_num {
 	__u64 __opaque[1];
 } __attribute__((aligned(8)));
 
-/*
- * Flags to control bpf_set_page_table behaviour.
-*/
 enum {
-	PTE_MAP,
-	PTE_UNMAP,
-	PTE_SET_PROT,
+	BPF_SBPF_PROT_EXEC = 0,
+	BPF_SBPF_PROT_RDONLY = 1,
+	BPF_SBPF_PROT_RDWR = 2,
 };
 
 #endif /* _UAPI__LINUX_BPF_H__ */

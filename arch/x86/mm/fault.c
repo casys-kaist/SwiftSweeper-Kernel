@@ -1344,7 +1344,12 @@ void do_user_addr_fault(struct pt_regs *regs,
 	if (!vma)
 		goto lock_mmap;
 
-	if (unlikely(access_error(error_code, vma))) {
+	/*
+	 * VM_MBPF handles the MPK fault in the registered custom user logic or reject it.
+	*/
+	if (error_code & X86_PF_PK) {
+		flags |= FAULT_FLAG_SBPF_EXEC;
+	} else if (unlikely(access_error(error_code, vma))) {
 		vma_end_read(vma);
 		goto lock_mmap;
 	}
@@ -1421,7 +1426,12 @@ retry:
 	 * we can handle it..
 	 */
 good_area:
-	if (unlikely(access_error(error_code, vma))) {
+	/*
+	 * VM_MBPF handles the MPK fault in the registered custom user logic or reject it.
+	*/
+	if (error_code & X86_PF_PK) {
+		flags |= FAULT_FLAG_SBPF_EXEC;
+	} else if (unlikely(access_error(error_code, vma))) {
 		bad_area_access_error(regs, error_code, address, vma);
 		return;
 	}

@@ -23,7 +23,11 @@
 /**
  * walk the page table range from the [start, end) 
  * continue_walk: if true, continue to walk the page table even if there exists hole in the page table.
- * negative value means the error code.
+ * The 'func' is expected to return one of the following values:
+ * SBPF_PTE_WALK_NEXT_PTE: Continue to the next PTE.
+ * SBPF_PTE_WALK_NEXT_PMD: Skip to the next PMD.
+ * SBPF_PTE_WALK_STOP: Stop the iteration.
+ * Negative value: Return the value as an error code.
  */
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 			      unsigned long end, pte_func func, void *aux,
@@ -674,82 +678,65 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 		}
 	}
 
-	if (unlikely(ret)) {
+	if (unlikely(ret))
 		printk("mbpf: bpf_unset_pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
 		       ret, address, len);
-	}
 
 	return ret;
 }
 
+extern int __execute_only_pkey(struct mm_struct *mm);
+static int __touch_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
+{
+	unsigned long prot = *(unsigned long *)_aux;
+	pte_t entry;
+	unsigned long pkey;
+
+	switch (prot) {
+	case BPF_SBPF_PROT_EXEC:
+		pkey = __execute_only_pkey(current->mm);
+		if (pkey == -1)
+			return -EINVAL;
+		entry = pte_set_flags(*pte, pkey << _PAGE_BIT_PKEY_BIT0);
+		break;
+	case BPF_SBPF_PROT_RDONLY:
+		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
+		entry = pte_wrprotect(entry);
+		break;
+	case BPF_SBPF_PROT_RDWR:
+		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
+		entry = pte_mkwrite(entry);
+		break;
+	default:
+		printk("mbpf: invalid prot %lu\n", prot);
+		return -EINVAL;
+	}
+
+	set_pte_at(current->mm, addr, pte, entry);
+	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
+
+	return SBPF_PTE_WALK_NEXT_PTE;
+}
+
+// Temporary makes the address range as an read-only.
 static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_flags,
 			 unsigned long prot)
 {
 	struct mm_struct *mm = current->mm;
-	pgd_t *pgd;
-	p4d_t *p4d;
-	pmd_t *pmd;
-	pud_t *pud;
-	pte_t *pte;
-	pte_t oldpte;
-	pte_t newpte;
-	unsigned long newprot;
-	pgprot_t new_pgprot;
-	struct page *page;
-	const int grows = prot & (PROT_GROWSDOWN | PROT_GROWSUP);
+	int ret;
 
-	prot &= ~(PROT_GROWSDOWN | PROT_GROWSUP);
-	if (grows == (PROT_GROWSDOWN | PROT_GROWSUP)) /* can't be both */
-		return -EINVAL;
-	if (!arch_validate_prot(prot, address)) {
-		printk("mbpf: error in arch_validate_prot");
-		return -EINVAL;
-	}
-	newprot = calc_vm_prot_bits(prot, 0);
-	new_pgprot = vm_get_page_prot(newprot);
+	if (len == 0)
+		return 0;
 
-	// mprotect_fixup
-	// change_protection
-	// change_protection_range
-	pgd = pgd_offset(mm, address);
-	if (pgd_none_or_clear_bad(pgd))
-		goto error;
-	// change_p4d_range
-	p4d = p4d_offset(pgd, address);
-	if (p4d_none_or_clear_bad(p4d))
-		goto error;
-	// change_pud_range
-	pud = pud_offset(p4d, address);
-	if (pud_none_or_clear_bad(pud))
-		goto error;
-	// change_pmd_range
-	pmd = pmd_offset(pud, address);
-	if (pmd_none_or_trans_huge_or_clear_bad(pmd))
-		goto error;
-	// change_pte_range
-	pte = pte_offset_map(pmd, address);
-	oldpte = *pte;
-	if (pte_none(oldpte))
-		goto error;
-	if (pte_present(oldpte)) {
-		page = pte_page(oldpte);
-		if (!page)
-			goto error;
-		newpte = pte_modify(oldpte, new_pgprot);
-		if (prot & PROT_WRITE)
-			newpte = pte_mkwrite(newpte);
-		set_pte_at(mm, address, pte, newpte);
+	address = address & PAGE_MASK;
 
-		if (pte_needs_flush(oldpte, newpte))
-			tlb_flush_pte_range(current->sbpf->tlb, address, PAGE_SIZE);
+	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte, &prot,
+					true);
+	if (unlikely(ret))
+		printk("mbpf: touch page pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
+		       ret, address, len);
 
-		// TODO: COW.
-	}
-
-	return 0;
-
-error:
-	return -EINVAL;
+	return ret;
 }
 
 BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long, paddr,
