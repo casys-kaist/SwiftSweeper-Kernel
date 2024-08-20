@@ -508,6 +508,9 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 			list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
 				 &old_sbpf->page_fault.sbpf_mm->children);
 		}
+	} else {
+		// Currently, we do not support the case that the parent process does not have a page fault function.
+		return -EINVAL;
 	}
 
 	if (old_sbpf->sbpf_func.prog != NULL) {
@@ -516,10 +519,8 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 	}
 
 	if (old_sbpf->wp_page_fault.prog != NULL) {
-		init_sbpf_wp_page_fault(tsk->sbpf, old_sbpf->wp_page_fault.aux,
-					old_sbpf->wp_page_fault.prog);
-		memcpy(tsk->sbpf->wp_page_fault.aux, old_sbpf->wp_page_fault.aux,
-		       PAGE_SIZE);
+		init_sbpf_wp_page_fault(tsk->sbpf, NULL, old_sbpf->wp_page_fault.prog);
+		tsk->sbpf->wp_page_fault.aux = old_sbpf->wp_page_fault.aux;
 	}
 
 	// We have to clean up user shared pages in case of fork.
