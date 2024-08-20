@@ -688,7 +688,7 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 extern int __execute_only_pkey(struct mm_struct *mm);
 static int __touch_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 {
-	unsigned long prot = *(unsigned long *)_aux;
+	unsigned long prot = (unsigned long)_aux;
 	pte_t entry;
 	unsigned long pkey;
 
@@ -730,7 +730,7 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 
 	address = address & PAGE_MASK;
 
-	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte, &prot,
+	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte, (void *)prot,
 					true);
 	if (unlikely(ret))
 		printk("mbpf: touch page pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
