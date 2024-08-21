@@ -33,8 +33,6 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 	ret = prog->bpf_func(current->sbpf->sbpf_func.arg, NULL);
 
 	tlb_finish_mmu(&tlb);
-	current->sbpf->tlb = NULL;
-
 done:
 	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
@@ -75,8 +73,6 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 
 	if (flags & FAULT_FLAG_SBPF_EXEC) {
 		if (sbpf->wp_page_fault.prog) {
-			// If the other thread is accessing the same page, we could return
-			// to reduce the contention points.
 			sbpf_fault.vaddr = fault_addr;
 			sbpf_fault.flags = flags;
 			sbpf_fault.len = PAGE_SIZE;
@@ -84,18 +80,15 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 
 			// Call page fault function.
 			ret = sbpf->wp_page_fault.prog->bpf_func(&sbpf_fault, NULL);
-
-			tlb_finish_mmu(&tlb);
-			current->sbpf->tlb = NULL;
 			goto done;
 		}
 		ret = -EINVAL;
-		goto done;
+		goto abort;
 	} else if (flags & FAULT_FLAG_WRITE) {
 		// If the other thread is accessing the same page, we could return
 		// to reduce the contention points.
 		if (!spin_trylock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock))
-			goto done;
+			goto abort;
 
 		// Walk the page table and call the page fault function.
 		// __handle_page_fault do copy_on_write.
@@ -103,8 +96,8 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 						__handle_page_fault, sbpf, false);
 
 		// Sucessfully copy on write.
+		spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 		if (!ret) {
-			spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 			if (sbpf->wp_page_fault.prog) {
 				sbpf_fault.vaddr = fault_addr;
 				sbpf_fault.flags = flags;
@@ -115,11 +108,8 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 				ret = sbpf->wp_page_fault.prog->bpf_func(&sbpf_fault,
 									 NULL);
 			}
-			tlb_finish_mmu(&tlb);
-			current->sbpf->tlb = NULL;
 			goto done;
 		}
-		spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 	}
 
 	sbpf_fault.vaddr = fault_addr;
@@ -129,13 +119,16 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 
 	// Call page fault function.
 	ret = current->sbpf->page_fault.prog->bpf_func(&sbpf_fault, NULL);
-	// Have to manually update the resident set size for the page fault.
-	update_hiwater_rss(current->mm);
-
-	tlb_finish_mmu(&tlb);
-	current->sbpf->tlb = NULL;
 
 done:
+	// Have to manually update the resident set size for the page fault.
+	update_hiwater_rss(current->mm);
+	tlb_finish_mmu(&tlb);
+	// Due to recursive page fault, nullifying the sbpf->tlb incurs #PF.
+	// Fixing this problem by skipping the nullification, might incur
+	// subtle concurrency bugs (?), but just skip it for now. 
+	
+abort:
 	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	return ret;

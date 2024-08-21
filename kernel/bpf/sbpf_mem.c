@@ -256,7 +256,7 @@ static int __set_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux_)
 	atomic_inc(&folio->_mapcount);
 	folio_get(folio);
 	set_pte_at(current->mm, addr, pte, entry);
-	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
+	tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 	if (aux->update_pmd) {
 		atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 	}
@@ -563,7 +563,7 @@ static int __unset_pte_single(pmd_t *pmd, pte_t *pte, unsigned long addr, void *
 	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
 		pmd_page = pmd_pgtable(*pmd);
 		pmd_clear(pmd);
-		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
+		tlb_remove_pmd_tlb_entry(current->sbpf->tlb, pmd, addr & PMD_MASK);
 		mm_dec_nr_ptes(current->sbpf->tlb->mm);
 		pte_free(current->mm, pmd_page);
 	}
@@ -604,7 +604,7 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	if (atomic_dec_and_test(&pmd_pgtable(*pmd)->pte_refcount)) {
 		pmd_page = pmd_pgtable(*pmd);
 		pmd_clear(pmd);
-		tlb_flush_pte_range(current->sbpf->tlb, addr & PMD_MASK, PMD_SIZE);
+		tlb_remove_pmd_tlb_entry(current->sbpf->tlb, pmd, addr & PMD_MASK);
 		mm_dec_nr_ptes(current->sbpf->tlb->mm);
 		pte_free(current->mm, pmd_page);
 		ret = SBPF_PTE_WALK_NEXT_PMD;
@@ -698,10 +698,12 @@ static int __touch_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 		if (pkey == -1)
 			return -EINVAL;
 		entry = pte_set_flags(*pte, pkey << _PAGE_BIT_PKEY_BIT0);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		break;
 	case BPF_SBPF_PROT_RDONLY:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
 		entry = pte_wrprotect(entry);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		break;
 	case BPF_SBPF_PROT_RDWR:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
@@ -713,7 +715,6 @@ static int __touch_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 	}
 
 	set_pte_at(current->mm, addr, pte, entry);
-	tlb_remove_tlb_entry(current->sbpf->tlb, pte, addr);
 
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
@@ -730,8 +731,8 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 
 	address = address & PAGE_MASK;
 
-	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte, (void *)prot,
-					true);
+	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte,
+					(void *)prot, true);
 	if (unlikely(ret))
 		printk("mbpf: touch page pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
 		       ret, address, len);
