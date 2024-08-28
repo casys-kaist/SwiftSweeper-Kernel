@@ -825,18 +825,41 @@ struct sbpf_iter_pte_aux {
 static int __iter_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct sbpf_iter_pte_aux *callback = aux;
+	unsigned long pkey;
+	pte_t entry;
 	int ret;
 
 	void *kaddr = kmap_local_page(pte_page(*pte));
 	ret = callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
 	kunmap_local(kaddr);
-	if (ret)
-		return SBPF_PTE_WALK_STOP;
 
-	return SBPF_PTE_WALK_NEXT_PTE;
+	switch (ret) {
+	case BPF_SBPF_ITER_TOUCH_NONE:
+		return SBPF_PTE_WALK_NEXT_PTE;
+	case BPF_SBPF_ITER_TOUCH_EXEC:
+		pkey = __execute_only_pkey(current->mm);
+		if (pkey == -1)
+			return -EINVAL;
+		entry = pte_set_flags(*pte, pkey << _PAGE_BIT_PKEY_BIT0);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
+		return SBPF_PTE_WALK_NEXT_PTE;
+	case BPF_SBPF_ITER_TOUCH_RDONLY:
+		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
+		entry = pte_wrprotect(entry);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
+		return SBPF_PTE_WALK_NEXT_PTE;
+	case BPF_SBPF_ITER_TOUCH_RDWR:
+		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
+		entry = pte_mkwrite(entry);
+		return SBPF_PTE_WALK_NEXT_PTE;
+	case BPF_SBPF_ITER_TOUCH_STOP:
+		return SBPF_PTE_WALK_STOP;
+	default:
+		return ret;
+	}
 }
 
-BPF_CALL_5(bpf_iter_pte, void *, start_vaddr, u64, len, void *, callback_fn, void *,
+BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_fn, void *,
 	   callback_ctx, u64, flag)
 {
 	struct sbpf_iter_pte_aux aux = {
@@ -860,8 +883,8 @@ BPF_CALL_5(bpf_iter_pte, void *, start_vaddr, u64, len, void *, callback_fn, voi
 	return ret;
 }
 
-const struct bpf_func_proto bpf_iter_pte_proto = {
-	.func = bpf_iter_pte,
+const struct bpf_func_proto bpf_iter_pte_touch_proto = {
+	.func = bpf_iter_pte_touch,
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 	.arg1_type = ARG_ANYTHING,

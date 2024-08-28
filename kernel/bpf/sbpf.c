@@ -291,8 +291,8 @@ static const struct bpf_func_proto *bpf_sbpf_func_proto(enum bpf_func_id func_id
 		return &bpf_unset_page_table_proto;
 	case BPF_FUNC_touch_page_table:
 		return &bpf_touch_page_table_proto;
-	case BPF_FUNC_iter_pte:
-		return &bpf_iter_pte_proto;
+	case BPF_FUNC_iter_pte_touch:
+		return &bpf_iter_pte_touch_proto;
 	default:
 		return bpf_base_func_proto(func_id);
 	}

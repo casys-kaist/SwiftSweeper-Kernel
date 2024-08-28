@@ -5621,7 +5621,7 @@ union bpf_attr {
  *		**0** if the uaddr is valid.
  *		**1** if the uaddr is invalid.
  *
- * void *bpf_iter_pte(void *start, size_t len, void *callback_fn, void *callback_ctx, u64 flags)
+ * u64 *bpf_iter_pte_touch(void *start, size_t len, void *callback_fn, void *callback_ctx, u64 flags)
  *	Description
  *		Iterate the page table entries with prog function f(void *kern_vaddr, void *ctx).
  *
@@ -5853,7 +5853,7 @@ union bpf_attr {
 	FN(set_page_table, 214, ##ctx) \
 	FN(unset_page_table, 215, ##ctx) \
 	FN(touch_page_table, 216, ##ctx) \
-	FN(iter_pte, 217, ##ctx) \
+	FN(iter_pte_touch, 217, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't
@@ -7255,6 +7255,14 @@ enum {
 	BPF_SBPF_PROT_EXEC = 0,
 	BPF_SBPF_PROT_RDONLY = 1,
 	BPF_SBPF_PROT_RDWR = 2,
+};
+
+enum {
+	BPF_SBPF_ITER_TOUCH_NONE = 0,
+	BPF_SBPF_ITER_TOUCH_EXEC = 1,
+	BPF_SBPF_ITER_TOUCH_RDONLY = 2,
+	BPF_SBPF_ITER_TOUCH_RDWR = 3,
+	BPF_SBPF_ITER_TOUCH_STOP = 4,
 };
 
 #endif /* _UAPI__LINUX_BPF_H__ */

@@ -3,6 +3,7 @@
  * Copyright (c) 2016 Facebook
  * Copyright (c) 2018 Covalent IO, Inc. http://covalent.io
  */
+#include "linux/bpf.h"
 #include <uapi/linux/btf.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/kernel.h>
@@ -522,7 +523,7 @@ static bool is_callback_calling_function(enum bpf_func_id func_id)
 	       func_id == BPF_FUNC_find_vma ||
 	       func_id == BPF_FUNC_loop ||
 	       func_id == BPF_FUNC_user_ringbuf_drain ||
-		   func_id == BPF_FUNC_iter_pte;
+		   func_id == BPF_FUNC_iter_pte_touch;
 }
 
 static bool is_storage_get_function(enum bpf_func_id func_id)
@@ -8563,7 +8564,7 @@ static int set_iter_pte_callback_state(struct bpf_verifier_env *env,
 	__mark_reg_not_init(env, &callee->regs[BPF_REG_5]);
 
 	callee->in_callback_fn = true;
-	callee->callback_ret_range = tnum_range(0, 1);
+	callee->callback_ret_range = tnum_range(0, -1);
 	return 0;
 }
 
@@ -9038,7 +9039,7 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 		err = __check_func_call(env, insn, insn_idx_p, meta.subprogno,
 					set_loop_callback_state);
 		break;
-	case BPF_FUNC_iter_pte:
+	case BPF_FUNC_iter_pte_touch:
 		err = __check_func_call(env, insn, insn_idx_p, meta.subprogno,
 					set_iter_pte_callback_state);
 		break;
