@@ -5620,6 +5620,20 @@ union bpf_attr {
  *	Return
  *		**0** if the uaddr is valid.
  *		**1** if the uaddr is invalid.
+ *
+ * void *bpf_iter_pte(void *start, size_t len, void *callback_fn, void *callback_ctx, u64 flags)
+ *	Description
+ *		Iterate the page table entries with prog function f(void *kern_vaddr, void *ctx).
+ *
+ *		If **callback_fn** returns 0, the helper will continue to the next
+ *		loop. If return value is 1, the helper will skip the rest of
+ *		the loops and return. Other return values are not used now,
+ *		and will be rejected by the verifier.
+ *		The number of loops are limited by 1 << 23 (~8 million) loops.
+ *
+ *	Return
+ *		The number of loops performed, **-EINVAL** for invalid **flags**,
+ *		**-E2BIG** if **nr_loops** exceeds the maximum number of loops.
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -5839,6 +5853,7 @@ union bpf_attr {
 	FN(set_page_table, 214, ##ctx) \
 	FN(unset_page_table, 215, ##ctx) \
 	FN(touch_page_table, 216, ##ctx) \
+	FN(iter_pte, 217, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't

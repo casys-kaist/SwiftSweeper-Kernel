@@ -816,3 +816,57 @@ const struct bpf_func_proto bpf_touch_page_table_proto = {
 	.gpl_only = false,
 	.ret_type = RET_INTEGER,
 };
+
+struct sbpf_iter_pte_aux {
+	bpf_callback_t callback;
+	void *callback_ctx;
+};
+
+static int __iter_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
+{
+	struct sbpf_iter_pte_aux *callback = aux;
+	int ret;
+
+	void *kaddr = kmap_local_page(pte_page(*pte));
+	ret = callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
+	kunmap_local(kaddr);
+	if (ret)
+		return SBPF_PTE_WALK_STOP;
+
+	return SBPF_PTE_WALK_NEXT_PTE;
+}
+
+BPF_CALL_5(bpf_iter_pte, void *, start_vaddr, u64, len, void *, callback_fn, void *,
+	   callback_ctx, u64, flag)
+{
+	struct sbpf_iter_pte_aux aux = {
+		.callback = callback_fn,
+		.callback_ctx = callback_ctx,
+	};
+	u64 ret;
+
+	if (start_vaddr == NULL)
+		return -EINVAL;
+	if (len == 0)
+		return -EINVAL;
+
+	if ((len / PAGE_SIZE) > BPF_MAX_LOOPS)
+		return -E2BIG;
+
+	ret = walk_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
+					(unsigned long)start_vaddr + len, __iter_pte,
+					&aux, true);
+
+	return ret;
+}
+
+const struct bpf_func_proto bpf_iter_pte_proto = {
+	.func = bpf_iter_pte,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_ANYTHING,
+	.arg2_type = ARG_ANYTHING,
+	.arg3_type = ARG_PTR_TO_FUNC,
+	.arg4_type = ARG_PTR_TO_STACK_OR_NULL,
+	.arg5_type = ARG_ANYTHING,
+};

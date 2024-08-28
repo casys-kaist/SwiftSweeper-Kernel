@@ -64,6 +64,7 @@ typedef int (*pte_func)(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux);
 extern const struct bpf_func_proto bpf_set_page_table_proto;
 extern const struct bpf_func_proto bpf_unset_page_table_proto;
 extern const struct bpf_func_proto bpf_touch_page_table_proto;
+extern const struct bpf_func_proto bpf_iter_pte_proto;
 
 /* APIs for Trie */
 void trie_init(struct trie_node **node);
