@@ -842,21 +842,26 @@ static int __iter_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 			return -EINVAL;
 		entry = pte_set_flags(*pte, pkey << _PAGE_BIT_PKEY_BIT0);
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		return SBPF_PTE_WALK_NEXT_PTE;
+		break;
 	case BPF_SBPF_ITER_TOUCH_RDONLY:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
 		entry = pte_wrprotect(entry);
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		return SBPF_PTE_WALK_NEXT_PTE;
+		break;
 	case BPF_SBPF_ITER_TOUCH_RDWR:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
 		entry = pte_mkwrite(entry);
-		return SBPF_PTE_WALK_NEXT_PTE;
+		break;
 	case BPF_SBPF_ITER_TOUCH_STOP:
 		return SBPF_PTE_WALK_STOP;
 	default:
-		return ret;
+		printk("mbpf: invalid prot %d\n", ret);
+		return -EINVAL;
 	}
+
+	set_pte_at(current->mm, addr, pte, entry);
+
+	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
 BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_fn, void *,
