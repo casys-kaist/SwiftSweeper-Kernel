@@ -7265,4 +7265,9 @@ enum {
 	BPF_SBPF_ITER_TOUCH_STOP = 4,
 };
 
+enum {
+	BPF_SBPF_ITER_FLAG_NONE = 0,
+	BPF_SBPF_ITER_FLAG_CREATE = 1,
+};
+
 #endif /* _UAPI__LINUX_BPF_H__ */

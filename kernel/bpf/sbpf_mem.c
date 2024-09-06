@@ -405,7 +405,6 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	struct mm_struct *mm = current->mm;
 	struct folio *folio = NULL;
 	int ret;
-	int new_folio = 0;
 	struct set_pte_aux aux;
 	pte_t entry;
 	pgprot_t pgprot;
@@ -431,14 +430,13 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	if (ret) {
 		if (likely(ret == -ENOENT)) {
 			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
-			folio_set_mbpf(folio);
-			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
 			if (unlikely(!folio))
 				return -ENOMEM;
+
+			folio_set_mbpf(folio);
+			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
 			if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
 				return -ENOMEM;
-
-			new_folio = true;
 
 			entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 			entry = pte_sw_mkyoung(entry);
@@ -822,7 +820,7 @@ struct sbpf_iter_pte_aux {
 	void *callback_ctx;
 };
 
-static int __iter_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
+static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
 	struct sbpf_iter_pte_aux *callback = aux;
 	unsigned long pkey;
@@ -864,6 +862,40 @@ static int __iter_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
+static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
+{
+	struct folio *folio;
+	pte_t entry;
+
+	if (unlikely(pte_present(*pte)))
+		return -EINVAL;
+
+	folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+	if (unlikely(!folio))
+		return -ENOMEM;
+
+	folio_set_mbpf(folio);
+	folio->page.sbpf_reverse = sbpf_reverse_init(addr);
+	if (unlikely(mem_cgroup_charge(folio, current->mm, GFP_KERNEL)))
+		return -ENOMEM;
+
+	entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
+	entry = pte_sw_mkyoung(entry);
+	entry = pte_mkwrite(entry);
+
+	atomic_inc(&folio->_mapcount);
+	set_pte_at(current->mm, addr, pte, entry);
+	tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
+	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
+
+	sbpf_reverse_insert_range(folio->page.sbpf_reverse, addr, addr + PAGE_SIZE);
+
+	inc_mm_counter(current->mm, MM_ANONPAGES);
+
+	// TODO. Optimization. If the callback function is NULL, we can skip the kmap_local_page.
+	return __iter_pte_none(pmd, pte, addr, aux);
+}
+
 BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_fn, void *,
 	   callback_ctx, u64, flag)
 {
@@ -881,9 +913,20 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 	if ((len / PAGE_SIZE) > BPF_MAX_LOOPS)
 		return -E2BIG;
 
-	ret = walk_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
-					(unsigned long)start_vaddr + len, __iter_pte,
-					&aux, true);
+	start_vaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)start_vaddr);
+
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	// Create a new page table entry for the given address range.
+	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
+		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
+						 (unsigned long)start_vaddr + len,
+						 __iter_pte_create, &aux);
+	} else {
+		ret = walk_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
+						(unsigned long)start_vaddr + len,
+						__iter_pte_none, &aux, true);
+	}
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return ret;
 }

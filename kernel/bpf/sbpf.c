@@ -126,8 +126,8 @@ done:
 	tlb_finish_mmu(&tlb);
 	// Due to recursive page fault, nullifying the sbpf->tlb incurs #PF.
 	// Fixing this problem by skipping the nullification, might incur
-	// subtle concurrency bugs (?), but just skip it for now. 
-	
+	// subtle concurrency bugs (?), but just skip it for now.
+
 abort:
 	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
