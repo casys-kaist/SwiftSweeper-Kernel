@@ -915,7 +915,6 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 
 	start_vaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)start_vaddr);
 
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 	// Create a new page table entry for the given address range.
 	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
 		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
@@ -926,7 +925,6 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 						(unsigned long)start_vaddr + len,
 						__iter_pte_none, &aux, true);
 	}
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return ret;
 }
