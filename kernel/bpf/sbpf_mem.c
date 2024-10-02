@@ -825,59 +825,92 @@ static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux
 	struct sbpf_iter_pte_aux *callback = aux;
 	unsigned long pkey;
 	pte_t entry;
-	int ret;
+	int ret = SBPF_PTE_WALK_NEXT_PTE;
+	int callback_ret = 0;
+	struct folio *folio;
+	void *kaddr;
 
-	void *kaddr = kmap_local_page(pte_page(*pte));
-	ret = callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
+	folio = page_folio(pte_page(*pte));
+	folio_lock(folio);
+	kaddr = kmap_local_page(pte_page(*pte));
+	callback_ret =
+		callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
 	kunmap_local(kaddr);
 
-	switch (ret) {
+	switch (callback_ret) {
 	case BPF_SBPF_ITER_TOUCH_NONE:
-		return SBPF_PTE_WALK_NEXT_PTE;
+		ret = SBPF_PTE_WALK_NEXT_PTE;
+		goto done;
 	case BPF_SBPF_ITER_TOUCH_EXEC:
 		pkey = __execute_only_pkey(current->mm);
-		if (pkey == -1)
-			return -EINVAL;
+		if (pkey == -1) {
+			ret = -EINVAL;
+			goto done;
+		}
 		entry = pte_set_flags(*pte, pkey << _PAGE_BIT_PKEY_BIT0);
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		break;
+		goto set;
 	case BPF_SBPF_ITER_TOUCH_RDONLY:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
 		entry = pte_wrprotect(entry);
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		break;
+		goto set;
 	case BPF_SBPF_ITER_TOUCH_RDWR:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
 		entry = pte_mkwrite(entry);
-		break;
+		goto set;
 	case BPF_SBPF_ITER_TOUCH_STOP:
-		return SBPF_PTE_WALK_STOP;
+		ret = SBPF_PTE_WALK_STOP;
+		goto done;
 	default:
 		printk("mbpf: invalid prot %d\n", ret);
-		return -EINVAL;
+		ret = -EINVAL;
+		goto done;
 	}
 
+set:
 	set_pte_at(current->mm, addr, pte, entry);
 
+done:
+	folio_unlock(folio);
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
 static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
 {
+	struct sbpf_iter_pte_aux *callback = aux;
 	struct folio *folio;
 	pte_t entry;
+	int ret = 0;
+	void *kaddr;
 
-	if (unlikely(pte_present(*pte)))
+	if (unlikely(pte_present(*pte))) {
+		folio = page_folio(pte_page(*pte));
+		if (likely(!IS_ERR_OR_NULL(folio)) && !(pte_flags(*pte) & _PAGE_RW)) {
+			folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+			if (unlikely(IS_ERR_OR_NULL(folio))) {
+				printk("mbpf: copy on write failed on __iter_pte_create 0x%lx\n",
+				       addr);
+				return -EINVAL;
+			}
+			folio_lock(folio);
+			goto done;
+		}
+
 		return -EINVAL;
+	}
 
-	folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+	folio = folio_alloc(GFP_USER | GFP_ATOMIC | __GFP_ZERO, 0);
 	if (unlikely(!folio))
 		return -ENOMEM;
 
+	folio_lock(folio);
 	folio_set_mbpf(folio);
 	folio->page.sbpf_reverse = sbpf_reverse_init(addr);
-	if (unlikely(mem_cgroup_charge(folio, current->mm, GFP_KERNEL)))
-		return -ENOMEM;
+	if (unlikely(mem_cgroup_charge(folio, current->mm, GFP_KERNEL))) {
+		ret = -ENOMEM;
+		goto err;
+	}
 
 	entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
 	entry = pte_sw_mkyoung(entry);
@@ -889,11 +922,17 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 
 	sbpf_reverse_insert_range(folio->page.sbpf_reverse, addr, addr + PAGE_SIZE);
-
 	inc_mm_counter(current->mm, MM_ANONPAGES);
 
+done:
 	// TODO. Optimization. If the callback function is NULL, we can skip the kmap_local_page.
-	return __iter_pte_none(pmd, pte, addr, aux);
+	kaddr = kmap_local_page(folio_page(folio, 0));
+	ret = callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
+	kunmap_local(kaddr);
+
+err:
+	folio_unlock(folio);
+	return ret;
 }
 
 BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_fn, void *,
