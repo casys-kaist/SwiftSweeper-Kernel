@@ -831,7 +831,6 @@ static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux
 	void *kaddr;
 
 	folio = page_folio(pte_page(*pte));
-	folio_lock(folio);
 	kaddr = kmap_local_page(pte_page(*pte));
 	callback_ret =
 		callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
@@ -872,7 +871,6 @@ set:
 	set_pte_at(current->mm, addr, pte, entry);
 
 done:
-	folio_unlock(folio);
 	return SBPF_PTE_WALK_NEXT_PTE;
 }
 
@@ -893,7 +891,6 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 				       addr);
 				return -EINVAL;
 			}
-			folio_lock(folio);
 			goto done;
 		}
 
@@ -904,7 +901,6 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 	if (unlikely(!folio))
 		return -ENOMEM;
 
-	folio_lock(folio);
 	folio_set_mbpf(folio);
 	folio->page.sbpf_reverse = sbpf_reverse_init(addr);
 	if (unlikely(mem_cgroup_charge(folio, current->mm, GFP_KERNEL))) {
@@ -931,7 +927,6 @@ done:
 	kunmap_local(kaddr);
 
 err:
-	folio_unlock(folio);
 	return ret;
 }
 
@@ -955,6 +950,7 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 	start_vaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)start_vaddr);
 
 	// Create a new page table entry for the given address range.
+	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
 		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
 						 (unsigned long)start_vaddr + len,
@@ -964,6 +960,7 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 						(unsigned long)start_vaddr + len,
 						__iter_pte_none, &aux, true);
 	}
+	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
 
 	return ret;
 }

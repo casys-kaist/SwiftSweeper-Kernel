@@ -90,7 +90,7 @@ static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long 
 								  unsigned long end)
 {
 	struct sbpf_reverse_map_elem *map_elem =
-		kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
+		kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL | GFP_ATOMIC);
 #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
 	struct profile_t *profile = &current->sbpf->profile;
 #endif
@@ -108,7 +108,7 @@ static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long 
 void *sbpf_reverse_init(unsigned long paddr)
 {
 	struct sbpf_reverse_map *map =
-		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
+		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL | GFP_ATOMIC);
 #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
 	struct profile_t *profile = &current->sbpf->profile;
 #endif
