@@ -87,7 +87,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 	} else if (flags & FAULT_FLAG_WRITE) {
 		// If the other thread is accessing the same page, we could return
 		// to reduce the contention points.
-		if (!spin_trylock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock))
+		if (!sbpf_mm_trylock(current->sbpf->page_fault.sbpf_mm, vaddr))
 			goto abort;
 
 		// Walk the page table and call the page fault function.
@@ -96,7 +96,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 						__handle_page_fault, sbpf, false);
 
 		// Sucessfully copy on write.
-		spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+		sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 		if (!ret) {
 			if (sbpf->wp_page_fault.prog) {
 				sbpf_fault.vaddr = fault_addr;
@@ -330,7 +330,8 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
 	INIT_RADIX_TREE(sbpf->page_fault.sbpf_mm->user_shared_pages, GFP_KERNEL);
 	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
-	spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_lock);
+	for (int i = 0; i < PGTABLE_LOCK_SIZE; i++)
+		spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_locks[i]);
 	rwlock_init(&sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (aux_ptr) {

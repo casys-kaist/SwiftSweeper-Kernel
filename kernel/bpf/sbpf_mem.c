@@ -276,7 +276,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 {
 	unsigned long paddr;
 	struct folio *folio;
-	size_t cnt = 0;
 	int ret;
 	pte_t entry;
 	struct set_pte_aux aux;
@@ -289,6 +288,27 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 
 	if (unlikely(orig_folio == NULL || orig_folio->page.sbpf_reverse == NULL))
 		return ERR_PTR(-EINVAL);
+
+	if ((unsigned long)orig_folio->page.sbpf_reverse & 0xf) {
+		paddr = (unsigned long)orig_folio->page.sbpf_reverse & PAGE_MASK;
+		if (unlikely(paddr == 0))
+			return ERR_PTR(-EINVAL);
+
+		folio = orig_folio;
+		entry = mk_pte(&folio->page, PAGE_SHARED_EXEC);
+		entry = pte_sw_mkyoung(entry);
+		entry = pte_mkwrite(entry);
+		aux.entry = &entry;
+		aux.update_pmd = false;
+		ret = walk_page_table_pte_range(current->mm, paddr, paddr + PAGE_SIZE,
+						__set_write, &aux, false);
+		if (unlikely(ret)) {
+			printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n", ret,
+			       paddr, paddr + PAGE_SIZE);
+			return ERR_PTR(ret);
+		}
+		return folio;
+	}
 
 	paddr = orig_folio->page.sbpf_reverse->paddr;
 	if (unlikely(paddr == 0))
@@ -333,7 +353,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 #else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
-			cnt += (cur->end - cur->start) / PAGE_SIZE;
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
 							__set_pte, &aux, false);
 			if (unlikely(ret)) {
@@ -370,7 +389,6 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		}
 #else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
-			cnt += (cur->end - cur->start) / PAGE_SIZE;
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
 							__set_write, &aux, false);
 			if (unlikely(ret)) {
@@ -434,7 +452,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 				return -ENOMEM;
 
 			folio_set_mbpf(folio);
-			folio->page.sbpf_reverse = sbpf_reverse_init(paddr);
+			folio->page.sbpf_reverse = __sbpf_reverse_init(paddr);
 			if (mem_cgroup_charge(folio, current->mm, GFP_KERNEL))
 				return -ENOMEM;
 
@@ -511,7 +529,6 @@ struct unset_pte_aux {
 
 static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *folio)
 {
-	uint64_t paddr;
 	int ret;
 
 	ret = sbpf_reverse_remove_range(folio->page.sbpf_reverse, start, end);
@@ -522,7 +539,6 @@ static inline int unset_trie_entry(uint64_t start, uint64_t end, struct folio *f
 	}
 	if (sbpf_reverse_empty(folio->page.sbpf_reverse)) {
 		BUG_ON(folio_ref_count(folio) == 0);
-		paddr = folio->page.sbpf_reverse->paddr;
 		sbpf_reverse_delete(folio->page.sbpf_reverse);
 		folio->page.sbpf_reverse = NULL;
 		dec_mm_counter(current->mm, MM_ANONPAGES);
@@ -544,13 +560,25 @@ static int __unset_pte_single(pmd_t *pmd, pte_t *pte, unsigned long addr, void *
 		return 0;
 
 	// If the folio is shared, we have to copy the page before remove (folio).
-	if ((!(pte_flags(*pte) & _PAGE_RW)) &&
-	    folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
-		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
-		if (IS_ERR_OR_NULL(folio)) {
-			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
-			       addr);
-			return -EINVAL;
+	if ((!(pte_flags(*pte) & _PAGE_RW))) {
+		if ((unsigned long)folio->page.sbpf_reverse & 0xf) {
+			if (folio_ref_count(folio) != 1) {
+				folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+				if (IS_ERR_OR_NULL(folio)) {
+					printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+					       addr);
+					return -EINVAL;
+				}
+			}
+		} else {
+			if (folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
+				folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+				if (IS_ERR_OR_NULL(folio)) {
+					printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+					       addr);
+					return -EINVAL;
+				}
+			}
 		}
 	}
 
@@ -585,13 +613,25 @@ static int __unset_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 		return 0;
 
 	// If the folio is shared, we have to copy the page before remove (folio).
-	if ((!(pte_flags(*pte) & _PAGE_RW)) &&
-	    folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
-		folio = sbpf_mem_copy_on_write(current->sbpf, folio);
-		if (IS_ERR_OR_NULL(folio)) {
-			printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
-			       addr);
-			return -EINVAL;
+	if ((!(pte_flags(*pte) & _PAGE_RW))) {
+		if ((unsigned long)folio->page.sbpf_reverse & 0xf) {
+			if (folio_ref_count(folio) != 1) {
+				folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+				if (IS_ERR_OR_NULL(folio)) {
+					printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+					       addr);
+					return -EINVAL;
+				}
+			}
+		} else {
+			if (folio->page.sbpf_reverse->size != folio_ref_count(folio)) {
+				folio = sbpf_mem_copy_on_write(current->sbpf, folio);
+				if (IS_ERR_OR_NULL(folio)) {
+					printk("mbpf: copy on write failed on bpf_unset_pte 0x%lx\n",
+					       addr);
+					return -EINVAL;
+				}
+			}
 		}
 	}
 
@@ -747,9 +787,9 @@ BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long,
 	if (!current->sbpf)
 		return -EINVAL;
 
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_set_pte(vaddr, len, paddr, vmf_flags, prot);
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -768,9 +808,9 @@ BPF_CALL_2(bpf_unset_page_table, unsigned long, vaddr, size_t, len)
 	if (!current->sbpf)
 		return -EINVAL;
 
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_unset_pte(vaddr, len);
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -802,9 +842,9 @@ BPF_CALL_5(bpf_touch_page_table, unsigned long, vaddr, size_t, len, unsigned lon
 	if (!current->sbpf)
 		return -EINVAL;
 
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_touch_pte(vaddr, len, vmf_flags, prot);
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -917,7 +957,6 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 	tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
 
-	sbpf_reverse_insert_range(folio->page.sbpf_reverse, addr, addr + PAGE_SIZE);
 	inc_mm_counter(current->mm, MM_ANONPAGES);
 
 done:
@@ -950,7 +989,7 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 	start_vaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)start_vaddr);
 
 	// Create a new page table entry for the given address range.
-	spin_lock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, (unsigned long)start_vaddr);
 	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
 		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
 						 (unsigned long)start_vaddr + len,
@@ -960,7 +999,7 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 						(unsigned long)start_vaddr + len,
 						__iter_pte_none, &aux, true);
 	}
-	spin_unlock(&current->sbpf->page_fault.sbpf_mm->pgtable_lock);
+	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, (unsigned long)start_vaddr);
 
 	return ret;
 }

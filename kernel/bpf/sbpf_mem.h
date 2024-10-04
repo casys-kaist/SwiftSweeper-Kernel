@@ -1,12 +1,16 @@
 #ifndef __SBPF_MEM_H__
 #define __SBPF_MEM_H__
 
+#include <linux/hash.h>
 #include <linux/types.h>
 #include <linux/radix-tree.h>
 #include <linux/maple_tree.h>
 #include <asm/pgtable_types.h>
 
 #define TRI_SIZE 512
+
+#define PGTABLE_LOCK_BIT 8
+#define PGTABLE_LOCK_SIZE (1 << PGTABLE_LOCK_BIT)
 
 /* MAP TREE is more stable than the linked list, but requires more space and time. */
 // #define BUD_REVERSE_USE_MAPLE_TREE 1
@@ -41,8 +45,24 @@ struct sbpf_mm_struct {
 	struct list_head children;
 	struct list_head elem;
 	atomic_t refcnt; // Reference count for the sbpf_mm_struct
-	spinlock_t pgtable_lock; // Lock used for protecting concurrent page table accesses
+	spinlock_t pgtable_locks[PGTABLE_LOCK_SIZE];
 };
+
+static inline void sbpf_mm_lock(struct sbpf_mm_struct *sbpf_mm, unsigned long addr)
+{
+	spin_lock(&sbpf_mm->pgtable_locks[hash_ptr((void *)addr, PGTABLE_LOCK_BIT)]);
+}
+
+static inline void sbpf_mm_unlock(struct sbpf_mm_struct *sbpf_mm, unsigned long addr)
+{
+	spin_unlock(&sbpf_mm->pgtable_locks[hash_ptr((void *)addr, PGTABLE_LOCK_BIT)]);
+}
+
+static inline bool sbpf_mm_trylock(struct sbpf_mm_struct *sbpf_mm, unsigned long addr)
+{
+	return spin_trylock(
+		&sbpf_mm->pgtable_locks[hash_ptr((void *)addr, PGTABLE_LOCK_BIT)]);
+}
 
 struct trie_node {
 	union {
@@ -76,6 +96,7 @@ int trie_free(struct trie_node *root);
 
 /* APIs for reverse mapping */
 void *sbpf_reverse_init(unsigned long paddr);
+void *__sbpf_reverse_init(unsigned long paddr);
 int sbpf_reverse_insert(struct sbpf_reverse_map *map, unsigned long addr);
 int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 			      unsigned long end);

@@ -8,6 +8,7 @@
 #include "sbpf_mem.h"
 
 #ifdef BUD_REVERSE_USE_MAPLE_TREE
+#error "Not supported"
 void *sbpf_reverse_init(unsigned long paddr)
 {
 	struct sbpf_reverse_map *map =
@@ -107,6 +108,14 @@ static inline struct sbpf_reverse_map_elem *init_reverse_map_elem(unsigned long 
 
 void *sbpf_reverse_init(unsigned long paddr)
 {
+	paddr = paddr & PAGE_MASK;
+	paddr += 1;
+
+	return (void *)paddr;
+}
+
+void *__sbpf_reverse_init(unsigned long paddr)
+{
 	struct sbpf_reverse_map *map =
 		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL | GFP_ATOMIC);
 #ifdef CONFIG_BPF_SBPF_MEM_DEBUG
@@ -133,9 +142,9 @@ int sbpf_reverse_insert_range(struct sbpf_reverse_map *map, unsigned long start,
 	struct profile_t *profile = &current->sbpf->profile;
 #endif
 
-	if (map == NULL)
+	if (map == NULL || (unsigned long)map & 0xf)
 		return -EINVAL;
-
+	
 	map->size += (end - start) / PAGE_SIZE;
 	map->cached_elem = NULL; // Only enables cache when burst frees are processed
 
@@ -185,6 +194,9 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 
 	if (map == NULL)
 		return -EINVAL;
+
+	if ((unsigned long)map & 0xf)
+		return 0;
 
 	map->size -= (end - start) / PAGE_SIZE;
 
@@ -284,7 +296,8 @@ int sbpf_reverse_remove_range(struct sbpf_reverse_map *map, unsigned long start,
 
 int sbpf_reverse_empty(struct sbpf_reverse_map *map)
 {
-	if (map == NULL || map->size == 0 || list_empty(&map->elem)) {
+	if (map == NULL || (unsigned long)map & 0xf || map->size == 0 ||
+	    list_empty(&map->elem)) {
 		return 1;
 	}
 
@@ -301,6 +314,10 @@ void sbpf_reverse_delete(struct sbpf_reverse_map *map)
 
 	if (map == NULL)
 		return;
+
+	if ((unsigned long)map & 0xf) {
+		return;
+	}
 
 	list_for_each_entry_safe (cur, next, &map->elem, list) {
 		list_del(&cur->list);
@@ -325,7 +342,11 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
 	if (src == NULL)
 		return NULL;
 
-	dst = sbpf_reverse_init(src->paddr);
+	if ((unsigned long)src & 0xf) {
+		return src;
+	}
+
+	dst = __sbpf_reverse_init(src->paddr);
 	list_for_each_entry (cur, &src->elem, list) {
 		new = kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
 		new->start = cur->start;
@@ -350,8 +371,14 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map)
 		return;
 
 	printk(KERN_INFO "dump reverse map:\n");
-	list_for_each_entry (cur, &map->elem, list) {
-		printk(KERN_INFO "\tstart: %lx, end: %lx\n", cur->start, cur->end);
+	if ((unsigned long)map & 0xf) {
+		printk(KERN_INFO "dump reverse map: %lx\n",
+		       (unsigned long)map & PAGE_MASK);
+	} else {
+		list_for_each_entry (cur, &map->elem, list) {
+			printk(KERN_INFO "\tstart: %lx, end: %lx\n", cur->start,
+			       cur->end);
+		}
 	}
 }
 #endif
