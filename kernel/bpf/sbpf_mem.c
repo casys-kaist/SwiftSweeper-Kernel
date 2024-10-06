@@ -942,7 +942,7 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 		return -ENOMEM;
 
 	folio_set_mbpf(folio);
-	folio->page.sbpf_reverse = sbpf_reverse_init(addr);
+	folio->page.sbpf_reverse = __sbpf_reverse_init(addr);
 	if (unlikely(mem_cgroup_charge(folio, current->mm, GFP_KERNEL))) {
 		ret = -ENOMEM;
 		goto err;
@@ -956,6 +956,7 @@ static int __iter_pte_create(pmd_t *pmd, pte_t *pte, unsigned long addr, void *a
 	set_pte_at(current->mm, addr, pte, entry);
 	tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 	atomic_inc(&pmd_pgtable(*pmd)->pte_refcount);
+	sbpf_reverse_insert_range(folio->page.sbpf_reverse, addr, addr + PAGE_SIZE);
 
 	inc_mm_counter(current->mm, MM_ANONPAGES);
 
