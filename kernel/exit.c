@@ -69,6 +69,8 @@
 #include <linux/rethook.h>
 #include <linux/sysfs.h>
 #include <linux/user_events.h>
+#include <linux/sbpf.h>
+
 #include <linux/uaccess.h>
 
 #include <uapi/linux/wait.h>
@@ -819,6 +821,9 @@ void __noreturn do_exit(long code)
 {
 	struct task_struct *tsk = current;
 	int group_dead;
+#ifdef CONFIG_BPF_SBPF_MEM_DEBUG
+	print_debug_info(tsk);
+#endif
 
 	WARN_ON(irqs_disabled());
 
@@ -836,6 +841,7 @@ void __noreturn do_exit(long code)
 	io_uring_files_cancel();
 	exit_signals(tsk);  /* sets PF_EXITING */
 
+	exit_sbpf(tsk);
 	acct_update_integrals(tsk);
 	group_dead = atomic_dec_and_test(&tsk->signal->live);
 	if (group_dead) {

@@ -78,6 +78,8 @@
 #include <linux/ptrace.h>
 #include <linux/vmalloc.h>
 #include <linux/sched/sysctl.h>
+#include <linux/sbpf.h>
+#include <linux/mm_types.h>
 
 #include <trace/events/kmem.h>
 
@@ -430,6 +432,9 @@ void pmd_install(struct mm_struct *mm, pmd_t *pmd, pgtable_t *pte)
 		 */
 		smp_wmb(); /* Could be smp_wmb__xxx(before|after)_spin_lock */
 		pmd_populate(mm, pmd, *pte);
+#ifdef CONFIG_BPF_SBPF
+		pte_ref_set(*pte, 0);
+#endif
 		*pte = NULL;
 	}
 	spin_unlock(ptl);
@@ -1027,6 +1032,8 @@ copy_present_ptes(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma
 		}
 		rss[MM_ANONPAGES]++;
 		VM_WARN_ON_FOLIO(PageAnonExclusive(page), folio);
+	} else if (src_vma->vm_flags & VM_MBPF) {
+		copy_sbpf_page(dst_vma, src_vma, dst_pte, src_pte, addr, rss, folio);
 	} else {
 		folio_dup_file_rmap_pte(folio, page);
 		rss[mm_counter_file(folio)]++;
@@ -1238,6 +1245,10 @@ copy_pmd_range(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,
 		if (copy_pte_range(dst_vma, src_vma, dst_pmd, src_pmd,
 				   addr, next))
 			return -ENOMEM;
+		if (src_vma->vm_flags & VM_MBPF) {
+			atomic_set(&pmd_pgtable(*dst_pmd)->pte_refcount, 
+				atomic_read(&pmd_pgtable(*src_pmd)->pte_refcount));
+		}
 	} while (dst_pmd++, src_pmd++, addr = next, addr != end);
 	return 0;
 }
@@ -1324,6 +1335,9 @@ vma_needs_copy(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma)
 		return true;
 
 	if (src_vma->anon_vma)
+		return true;
+
+	if (src_vma->vm_flags & VM_MBPF)
 		return true;
 
 	/*
@@ -5600,10 +5614,24 @@ vm_fault_t handle_mm_fault(struct vm_area_struct *vma, unsigned long address,
 
 	lru_gen_enter_fault(vma);
 
-	if (unlikely(is_vm_hugetlb_page(vma)))
-		ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
-	else
-		ret = __handle_mm_fault(vma, address, flags);
+#ifdef CONFIG_BPF_SBPF
+	if (vma->vm_flags & VM_MBPF || flags & FAULT_FLAG_SBPF_EXEC) {
+		if (current->sbpf != NULL && current->sbpf->page_fault.prog != NULL) {
+			ret = sbpf_handle_page_fault(current->sbpf, vma, address, flags);
+			if (ret)
+				ret = VM_FAULT_SIGSEGV;
+		} else {
+			ret = VM_FAULT_SIGSEGV;
+		}
+#else
+		ret = -EINVAL;
+#endif
+	} else {
+		if (unlikely(is_vm_hugetlb_page(vma)))
+			ret = hugetlb_fault(vma->vm_mm, vma, address, flags);
+		else
+			ret = __handle_mm_fault(vma, address, flags);
+	}
 
 	lru_gen_exit_fault();
 

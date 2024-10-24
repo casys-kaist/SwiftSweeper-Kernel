@@ -508,7 +508,8 @@ static bool is_sync_callback_calling_function(enum bpf_func_id func_id)
 	return func_id == BPF_FUNC_for_each_map_elem ||
 	       func_id == BPF_FUNC_find_vma ||
 	       func_id == BPF_FUNC_loop ||
-	       func_id == BPF_FUNC_user_ringbuf_drain;
+	       func_id == BPF_FUNC_user_ringbuf_drain ||
+		   func_id == BPF_FUNC_iter_pte_touch;
 }
 
 static bool is_async_callback_calling_function(enum bpf_func_id func_id)
@@ -9809,6 +9810,30 @@ static int set_rbtree_add_callback_state(struct bpf_verifier_env *env,
 	return 0;
 }
 
+static int set_iter_pte_callback_state(struct bpf_verifier_env *env,
+				       struct bpf_func_state *caller,
+				       struct bpf_func_state *callee,
+				       int insn_idx)
+{
+	/* bpf_iter_pte(void *start_vaddr, u64 len, void *callback_fn, void *callback_ctx,
+	 *	    u64 flags);
+	 * callback_fn(void *kvaddr, void *callback_ctx);
+	 */
+	__mark_reg_known_zero(&callee->regs[BPF_REG_1]);
+	callee->regs[BPF_REG_1].type = PTR_TO_MEM;
+	callee->regs[BPF_REG_1].mem_size = PAGE_SIZE;
+	callee->regs[BPF_REG_2].type = SCALAR_VALUE;
+	callee->regs[BPF_REG_3] = caller->regs[BPF_REG_4];
+
+	/* unused */
+	__mark_reg_not_init(env, &callee->regs[BPF_REG_4]);
+	__mark_reg_not_init(env, &callee->regs[BPF_REG_5]);
+
+	callee->in_callback_fn = true;
+	callee->callback_ret_range = retval_range(0, -1);
+	return 0;
+}
+
 static bool is_rbtree_lock_required_kfunc(u32 btf_id);
 
 /* Are we currently verifying the callback for a rbtree helper that must
@@ -10375,6 +10400,10 @@ static int check_helper_call(struct bpf_verifier_env *env, struct bpf_insn *insn
 				verbose(env, "frame%d bpf_loop iteration limit reached\n",
 					env->cur_state->curframe);
 		}
+		break;
+	case BPF_FUNC_iter_pte_touch:
+		err = push_callback_call(env, insn, insn_idx, meta.subprogno,
+					set_iter_pte_callback_state);
 		break;
 	case BPF_FUNC_dynptr_from_mem:
 		if (regs[BPF_REG_1].type != PTR_TO_MAP_VALUE) {
@@ -12605,6 +12634,12 @@ static int retrieve_ptr_limit(const struct bpf_reg_state *ptr_reg,
 		break;
 	case PTR_TO_MAP_VALUE:
 		max = ptr_reg->map_ptr->value_size;
+		ptr_limit = (mask_to_left ?
+			     ptr_reg->smin_value :
+			     ptr_reg->umax_value) + ptr_reg->off;
+		break;
+	case PTR_TO_MEM:
+		max = ptr_reg->mem_size;
 		ptr_limit = (mask_to_left ?
 			     ptr_reg->smin_value :
 			     ptr_reg->umax_value) + ptr_reg->off;
@@ -21062,7 +21097,8 @@ static bool can_be_sleepable(struct bpf_prog *prog)
 	}
 	return prog->type == BPF_PROG_TYPE_LSM ||
 	       prog->type == BPF_PROG_TYPE_KPROBE /* only for uprobes */ ||
-	       prog->type == BPF_PROG_TYPE_STRUCT_OPS;
+	       prog->type == BPF_PROG_TYPE_STRUCT_OPS ||
+		   prog->type == BPF_PROG_TYPE_SBPF;
 }
 
 static int check_attach_btf_id(struct bpf_verifier_env *env)
@@ -21084,7 +21120,7 @@ static int check_attach_btf_id(struct bpf_verifier_env *env)
 	}
 
 	if (prog->sleepable && !can_be_sleepable(prog)) {
-		verbose(env, "Only fentry/fexit/fmod_ret, lsm, iter, uprobe, and struct_ops programs can be sleepable\n");
+		verbose(env, "Only fentry/fexit/fmod_ret, lsm, iter, uprobe, struct_ops, and sbpf programs can be sleepable\n");
 		return -EINVAL;
 	}
 

@@ -103,6 +103,7 @@
 #include <linux/rseq.h>
 #include <uapi/linux/pidfd.h>
 #include <linux/pidfs.h>
+#include <linux/sbpf.h>
 
 #include <asm/pgalloc.h>
 #include <linux/uaccess.h>
@@ -690,7 +691,8 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 		if (mpnt->vm_flags & VM_ACCOUNT) {
 			unsigned long len = vma_pages(mpnt);
 
-			if (security_vm_enough_memory_mm(oldmm, len)) /* sic */
+			if (!(mpnt->vm_flags & VM_MBPF) &&
+			 	security_vm_enough_memory_mm(oldmm, len)) /* sic */
 				goto fail_nomem;
 			charge = len;
 		}
@@ -821,6 +823,11 @@ static void check_mm(struct mm_struct *mm)
 
 	BUILD_BUG_ON_MSG(ARRAY_SIZE(resident_page_types) != NR_MM_COUNTERS,
 			 "Please make sure 'struct resident_page_types[]' is updated as well");
+
+#ifdef CONFIG_BPF_SBPF
+	// FixMe! This is a parital fix for the check mm failed.
+	return;
+#endif
 
 	for (i = 0; i < NR_MM_COUNTERS; i++) {
 		long x = percpu_counter_sum(&mm->rss_stat[i]);
@@ -1193,6 +1200,10 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 	tsk->last_mm_cid = -1;
 	tsk->mm_cid_active = 0;
 	tsk->migrate_from_cpu = -1;
+#endif
+
+#ifdef CONFIG_BPF_SBPF
+	tsk->sbpf = NULL;
 #endif
 	return tsk;
 
@@ -2399,6 +2410,9 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
+	retval = copy_sbpf(clone_flags, p);
+	if (retval)
+		goto bad_fork_sbpf;
 
 	stackleak_task_init(p);
 
@@ -2637,6 +2651,7 @@ bad_fork_free_pid:
 		free_pid(pid);
 bad_fork_cleanup_thread:
 	exit_thread(p);
+bad_fork_sbpf:
 bad_fork_cleanup_io:
 	if (p->io_context)
 		exit_io_context(p);

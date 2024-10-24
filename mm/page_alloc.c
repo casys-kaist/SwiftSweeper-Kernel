@@ -1129,6 +1129,8 @@ __always_inline bool free_pages_prepare(struct page *page,
 	}
 	if (PageMappingFlags(page))
 		page->mapping = NULL;
+	if (folio_test_mbpf(page_folio(page)))
+		page->mapping = NULL;
 	if (is_check_pages_enabled()) {
 		if (free_page_is_bad(page))
 			bad++;

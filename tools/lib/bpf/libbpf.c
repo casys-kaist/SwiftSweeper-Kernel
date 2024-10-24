@@ -126,12 +126,7 @@ static const char * const attach_type_name[] = {
 	[BPF_PERF_EVENT]		= "perf_event",
 	[BPF_TRACE_KPROBE_MULTI]	= "trace_kprobe_multi",
 	[BPF_STRUCT_OPS]		= "struct_ops",
-	[BPF_NETFILTER]			= "netfilter",
-	[BPF_TCX_INGRESS]		= "tcx_ingress",
-	[BPF_TCX_EGRESS]		= "tcx_egress",
-	[BPF_TRACE_UPROBE_MULTI]	= "trace_uprobe_multi",
-	[BPF_NETKIT_PRIMARY]		= "netkit_primary",
-	[BPF_NETKIT_PEER]		= "netkit_peer",
+	[BPF_SBPF_PAGE_FAULT]	= "sbpf_page_fault",
 };
 
 static const char * const link_type_name[] = {
@@ -222,6 +217,7 @@ static const char * const prog_type_name[] = {
 	[BPF_PROG_TYPE_SK_LOOKUP]		= "sk_lookup",
 	[BPF_PROG_TYPE_SYSCALL]			= "syscall",
 	[BPF_PROG_TYPE_NETFILTER]		= "netfilter",
+	[BPF_PROG_TYPE_SBPF]		= "sbpf",
 };
 
 static int __base_pr(enum libbpf_print_level level, const char *format,
@@ -468,6 +464,10 @@ struct bpf_program {
 	__u32 line_info_rec_size;
 	__u32 line_info_cnt;
 	__u32 prog_flags;
+
+	/* sbpf */
+	void *aux_ptr;
+	size_t aux_len;
 };
 
 struct bpf_struct_ops {
@@ -8451,6 +8451,17 @@ int bpf_object__load(struct bpf_object *obj)
 	return bpf_object_load(obj, 0, NULL);
 }
 
+int bpf_program__set_aux(struct bpf_program *prog, void *aux, size_t len)
+{
+	if (!prog || !aux || prog->type != BPF_PROG_TYPE_SBPF)
+		return -EINVAL;
+
+	prog->aux_ptr = aux;
+	prog->aux_len = len;
+
+	return 0;
+}
+
 static int make_parent_dir(const char *path)
 {
 	char *cp, errmsg[STRERR_BUFSIZE];
@@ -9234,6 +9245,7 @@ static int attach_kprobe_multi(const struct bpf_program *prog, long cookie, stru
 static int attach_uprobe_multi(const struct bpf_program *prog, long cookie, struct bpf_link **link);
 static int attach_lsm(const struct bpf_program *prog, long cookie, struct bpf_link **link);
 static int attach_iter(const struct bpf_program *prog, long cookie, struct bpf_link **link);
+static int attach_sbpf(const struct bpf_program *prog, long cookie, struct bpf_link **link);
 
 static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("socket",		SOCKET_FILTER, 0, SEC_NONE),
@@ -9334,7 +9346,10 @@ static const struct bpf_sec_def section_defs[] = {
 	SEC_DEF("struct_ops+",		STRUCT_OPS, 0, SEC_NONE),
 	SEC_DEF("struct_ops.s+",	STRUCT_OPS, 0, SEC_SLEEPABLE),
 	SEC_DEF("sk_lookup",		SK_LOOKUP, BPF_SK_LOOKUP, SEC_ATTACHABLE),
-	SEC_DEF("netfilter",		NETFILTER, BPF_NETFILTER, SEC_NONE),
+	SEC_DEF("netfilter",		NETFILTER, 0, SEC_NONE),
+	SEC_DEF("sbpf/function",		SBPF, BPF_SBPF_FUNCTION, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
+	SEC_DEF("sbpf/page_fault",		SBPF, BPF_SBPF_PAGE_FAULT, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
+	SEC_DEF("sbpf/wp_page_fault",		SBPF, BPF_SBPF_WP_PAGE_FAULT, SEC_ATTACHABLE | SEC_SLEEPABLE, .prog_attach_fn=attach_sbpf),
 };
 
 int libbpf_register_prog_handler(const char *sec,
@@ -11514,6 +11529,70 @@ static int attach_uprobe_multi(const struct bpf_program *prog, long cookie, stru
 	free(binary_path);
 	free(func_name);
 	return ret;
+}
+
+struct bpf_link *bpf_program__attach_sbpf(const struct bpf_program *prog, const char *func_name)
+{
+	DECLARE_LIBBPF_OPTS(bpf_link_create_opts, link_create_opts);
+	enum bpf_attach_type attach_type;
+	struct bpf_link *link;
+	char errmsg[STRERR_BUFSIZE];
+	int prog_fd, link_fd;
+
+	prog_fd = bpf_program__fd(prog);
+	if (prog_fd < 0) {
+		pr_warn("prog '%s': can't attach before loaded\n", prog->name);
+		return libbpf_err_ptr(-EINVAL);
+	}
+
+	link = calloc(1, sizeof(*link));
+	if (!link)
+		return libbpf_err_ptr(-ENOMEM);
+	link->detach = &bpf_link__detach_fd;
+
+	attach_type = bpf_program__expected_attach_type(prog);
+
+	if (attach_type == BPF_SBPF_PAGE_FAULT || attach_type == BPF_SBPF_WP_PAGE_FAULT) {
+		link_create_opts.sbpf.aux_ptr = prog->aux_ptr;
+		link_create_opts.sbpf.aux_len = prog->aux_len;
+	}
+
+	link_fd = bpf_link_create(prog_fd, -1, attach_type, &link_create_opts);
+	if (link_fd < 0) {
+		link_fd = -errno;
+		free(link);
+		pr_warn("prog '%s': failed to attach to %s: %s\n",
+			prog->name, "sbpf",
+			libbpf_strerror_r(link_fd, errmsg, sizeof(errmsg)));
+		return libbpf_err_ptr(link_fd);
+	}
+	link->fd = link_fd;
+
+	return link;
+}
+
+static int attach_sbpf(const struct bpf_program *prog, long cookie, struct bpf_link **link)
+{
+	const char *func_name;
+	char *func;
+	int n;
+
+	*link = NULL;
+
+	if (strcmp(prog->sec_name, "sbpf") == 0)
+		return 0;
+
+	func_name = prog->sec_name + sizeof("sbpf/") - 1;
+
+	n = sscanf(func_name, "%m[a-zA-Z0-9_]", &func);
+	if (n < 1) {
+		pr_warn("sbpf name is invalid: %s\n", func_name);
+		return -EINVAL;
+	}
+
+	*link = bpf_program__attach_sbpf(prog, func);
+	free(func);
+	return libbpf_get_error(*link);
 }
 
 static void gen_uprobe_legacy_event_name(char *buf, size_t buf_sz,

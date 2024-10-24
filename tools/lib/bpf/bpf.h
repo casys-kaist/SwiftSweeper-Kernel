@@ -435,6 +435,10 @@ struct bpf_link_create_opts {
 			__u32 relative_id;
 			__u64 expected_revision;
 		} netkit;
+		struct {
+			void *aux_ptr;
+			size_t aux_len;
+		} sbpf;
 	};
 	size_t :0;
 };
@@ -690,6 +694,7 @@ struct bpf_token_create_opts {
  */
 LIBBPF_API int bpf_token_create(int bpffs_fd,
 				struct bpf_token_create_opts *opts);
+LIBBPF_API int bpf_sbpf_call_function(int prog_fd, void *arg_ptr, size_t arg_len);
 
 #ifdef __cplusplus
 } /* extern "C" */

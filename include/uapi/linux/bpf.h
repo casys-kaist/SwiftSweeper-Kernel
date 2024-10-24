@@ -902,6 +902,13 @@ union bpf_iter_link_info {
  *	Return
  *		A new file descriptor (a nonnegative integer), or -1 if an
  *		error occurred (in which case, *errno* is set appropriately).
+ * BPF_SBPF_CALL_FUNCTION
+ *	Description
+ *		Call sbpf task fucntion of target fd.
+ *
+ *	Return
+ *		Returns retrun val on success. On error, -1 is returned and *errno*
+ *		is set appropriately.
  *
  * NOTES
  *	eBPF objects (maps and programs) can be shared between processes.
@@ -958,6 +965,7 @@ enum bpf_cmd {
 	BPF_LINK_DETACH,
 	BPF_PROG_BIND_MAP,
 	BPF_TOKEN_CREATE,
+	BPF_SBPF_CALL_FUNCTION,
 	__MAX_BPF_CMD,
 };
 
@@ -1055,6 +1063,7 @@ enum bpf_prog_type {
 	BPF_PROG_TYPE_SK_LOOKUP,
 	BPF_PROG_TYPE_SYSCALL, /* a program that can execute syscalls */
 	BPF_PROG_TYPE_NETFILTER,
+	BPF_PROG_TYPE_SBPF,
 	__MAX_BPF_PROG_TYPE
 };
 
@@ -1115,6 +1124,9 @@ enum bpf_attach_type {
 	BPF_CGROUP_UNIX_GETSOCKNAME,
 	BPF_NETKIT_PRIMARY,
 	BPF_NETKIT_PEER,
+	BPF_SBPF_FUNCTION,
+	BPF_SBPF_PAGE_FAULT,
+	BPF_SBPF_WP_PAGE_FAULT,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1135,6 +1147,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_TCX = 11,
 	BPF_LINK_TYPE_UPROBE_MULTI = 12,
 	BPF_LINK_TYPE_NETKIT = 13,
+	BPF_LINK_TYPE_SBPF = 14,
 	__MAX_BPF_LINK_TYPE,
 };
 
@@ -1769,7 +1782,12 @@ union bpf_attr {
 				};
 				__u64		expected_revision;
 			} netkit;
+			struct {
+				void *aux_ptr; /* shared mapping between the user and the kernel. */
+				__u64 aux_len;
+			} sbpf;
 		};
+
 	} link_create;
 
 	struct { /* struct used by BPF_LINK_UPDATE command */
@@ -1817,6 +1835,11 @@ union bpf_attr {
 		__u32		bpffs_fd;
 	} token_create;
 
+	struct {
+		__u32		prog_fd;
+		void*		arg_ptr;
+		__u64		arg_len;
+	} sbpf_function;
 } __attribute__((aligned(8)));
 
 /* The description below is an attempt at providing documentation to eBPF
@@ -5782,6 +5805,58 @@ union bpf_attr {
  *		0 on success.
  *
  *		**-ENOENT** if the bpf_local_storage cannot be found.
+ *
+ * void *bpf_uaddr_to_kaddr(void *uaddr, size_t len)
+ *	Description
+ *		Transfer user address to kernel address.
+ *		For safety, ...
+ *	Return
+ *		kaddr on success.
+ *
+ *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_get_shared_page(void *kaddr, size_t len)
+ *	Description
+ *		Validate the shared kernel address.
+ *	Return
+ *		kaddr on success.
+ *
+ *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_set_page_table(void *uaddr, size_t len, void *paddr, u64 vmf_flags, u64 prot)
+ *	Description
+ *		Make entry at the faulted process page table.
+ *	Return
+ *		Mapped kernel address on success.
+ *
+ *		**NULL** if the uaddr is invalid.
+ *
+ * void *bpf_unset_page_table(void *uaddr, size_t len)
+ *	Description
+ *		Remove entry at the faulted process page table.
+ *	Return
+ *		**0** if the uaddr is valid.
+ *
+ * void *bpf_touch_page_table(void *uaddr, size_t len, void *paddr, u64 vmf_flags, u64 prot)
+ *	Description
+ *		Touch entry at the faulted process page table.
+ *	Return
+ *		**0** if the uaddr is valid.
+ *		**1** if the uaddr is invalid.
+ *
+ * u64 *bpf_iter_pte_touch(void *start, size_t len, void *callback_fn, void *callback_ctx, u64 flags)
+ *	Description
+ *		Iterate the page table entries with prog function f(void *kern_vaddr, void *ctx).
+ *
+ *		If **callback_fn** returns 0, the helper will continue to the next
+ *		loop. If return value is 1, the helper will skip the rest of
+ *		the loops and return. Other return values are not used now,
+ *		and will be rejected by the verifier.
+ *		The number of loops are limited by 1 << 23 (~8 million) loops.
+ *
+ *	Return
+ *		The number of loops performed, **-EINVAL** for invalid **flags**,
+ *		**-E2BIG** if **nr_loops** exceeds the maximum number of loops.
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -5996,6 +6071,12 @@ union bpf_attr {
 	FN(user_ringbuf_drain, 209, ##ctx)		\
 	FN(cgrp_storage_get, 210, ##ctx)		\
 	FN(cgrp_storage_delete, 211, ##ctx)		\
+	FN(uaddr_to_kaddr, 212, ##ctx) \
+	FN(get_shared_page, 213, ##ctx) \
+	FN(set_page_table, 214, ##ctx) \
+	FN(unset_page_table, 215, ##ctx) \
+	FN(touch_page_table, 216, ##ctx) \
+	FN(iter_pte_touch, 217, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't
@@ -7474,5 +7555,24 @@ struct bpf_iter_num {
 	 */
 	__u64 __opaque[1];
 } __attribute__((aligned(8)));
+
+enum {
+	BPF_SBPF_PROT_EXEC = 0,
+	BPF_SBPF_PROT_RDONLY = 1,
+	BPF_SBPF_PROT_RDWR = 2,
+};
+
+enum {
+	BPF_SBPF_ITER_TOUCH_NONE = 0,
+	BPF_SBPF_ITER_TOUCH_EXEC = 1,
+	BPF_SBPF_ITER_TOUCH_RDONLY = 2,
+	BPF_SBPF_ITER_TOUCH_RDWR = 3,
+	BPF_SBPF_ITER_TOUCH_STOP = 4,
+};
+
+enum {
+	BPF_SBPF_ITER_FLAG_NONE = 0,
+	BPF_SBPF_ITER_FLAG_CREATE = 1,
+};
 
 #endif /* _UAPI__LINUX_BPF_H__ */

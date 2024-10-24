@@ -103,7 +103,10 @@ struct page {
 				struct list_head pcp_list;
 			};
 			/* See page-flags.h for PAGE_MAPPING_FLAGS */
-			struct address_space *mapping;
+			union {
+				struct sbpf_reverse_map *sbpf_reverse;
+				struct address_space *mapping;
+			};
 			union {
 				pgoff_t index;		/* Our offset within mapping. */
 				unsigned long share;	/* share count for fsdax */
@@ -130,6 +133,11 @@ struct page {
 		struct {	/* Tail pages of compound page */
 			unsigned long compound_head;	/* Bit zero is set */
 		};
+#ifdef CONFIG_BPF_SBPF
+		struct {	/* Page table pages */
+			atomic_t pte_refcount; /* PTE page only */
+		};
+#endif
 		struct {	/* ZONE_DEVICE pages */
 			/** @pgmap: Points to the hosting device page map. */
 			struct dev_pagemap *pgmap;
@@ -1366,6 +1374,7 @@ enum fault_flag {
 	FAULT_FLAG_UNSHARE =		1 << 10,
 	FAULT_FLAG_ORIG_PTE_VALID =	1 << 11,
 	FAULT_FLAG_VMA_LOCK =		1 << 12,
+	FAULT_FLAG_SBPF_EXEC = 		1 << 13,
 };
 
 typedef unsigned int __bitwise zap_flags_t;
