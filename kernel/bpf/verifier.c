@@ -9830,7 +9830,7 @@ static int set_iter_pte_callback_state(struct bpf_verifier_env *env,
 	__mark_reg_not_init(env, &callee->regs[BPF_REG_5]);
 
 	callee->in_callback_fn = true;
-	callee->callback_ret_range = retval_range(0, -1);
+	callee->callback_ret_range = retval_range(-1, __BPF_SBPF_ITER_TOUCH_MAX);
 	return 0;
 }
 

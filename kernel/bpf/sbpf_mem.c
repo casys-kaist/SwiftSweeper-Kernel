@@ -338,8 +338,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		aux.update_pmd = false;
 #ifdef USE_MAPLE_TREE
 		mas.tree = folio->page.sbpf_reverse->mt;
-		mas_for_each(&mas, smap, ULONG_MAX)
-		{
+		mas_for_each (&mas, smap, ULONG_MAX) {
 			if (smap == NULL)
 				continue;
 			ret = walk_page_table_pte_range(
@@ -374,8 +373,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		aux.update_pmd = false;
 #ifdef USE_MAPLE_TREE
 		mas.tree = folio->page.sbpf_reverse->mt;
-		mas_for_each(&mas, smap, ULONG_MAX)
-		{
+		mas_for_each (&mas, smap, ULONG_MAX) {
 			if (smap == NULL)
 				continue;
 			ret = walk_page_table_pte_range(

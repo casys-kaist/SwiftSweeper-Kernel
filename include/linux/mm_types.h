@@ -135,6 +135,7 @@ struct page {
 		};
 #ifdef CONFIG_BPF_SBPF
 		struct {	/* Page table pages */
+			unsigned long _pte_pad_1; /* compound_head */
 			atomic_t pte_refcount; /* PTE page only */
 		};
 #endif
