@@ -5857,6 +5857,21 @@ union bpf_attr {
  *	Return
  *		The number of loops performed, **-EINVAL** for invalid **flags**,
  *		**-E2BIG** if **nr_loops** exceeds the maximum number of loops.
+ *
+ * void *bpf_kmap_uaddr(void *uaddr)
+ *	Description
+ *		Map PAGE_SIZE user address to kernel address temporary.
+ *	Return
+ *		**Kernel Address** if the uaddr is valid.
+ *		**NULL** if the uaddr is invalid.
+ *
+ * long bpf_kunmap_uaddr(void *ptr)
+ *	Description
+ *		Unmap PAGE_SIZE kernel address if the ptr is previsouly assigned user address.
+ *	Return
+ *		**0** if the ptr is valid.
+ *		**1** if the ptr is invalid.
+ *
  */
 #define ___BPF_FUNC_MAPPER(FN, ctx...)			\
 	FN(unspec, 0, ##ctx)				\
@@ -6077,6 +6092,8 @@ union bpf_attr {
 	FN(unset_page_table, 215, ##ctx) \
 	FN(touch_page_table, 216, ##ctx) \
 	FN(iter_pte_touch, 217, ##ctx) \
+	FN(kmap_uaddr, 218, ##ctx) \
+	FN(kunmap_uaddr, 219, ##ctx) \
 	/* */
 
 /* backwards-compatibility macros for users of __BPF_FUNC_MAPPER that don't

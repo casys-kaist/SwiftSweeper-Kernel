@@ -85,6 +85,8 @@ extern const struct bpf_func_proto bpf_set_page_table_proto;
 extern const struct bpf_func_proto bpf_unset_page_table_proto;
 extern const struct bpf_func_proto bpf_touch_page_table_proto;
 extern const struct bpf_func_proto bpf_iter_pte_touch_proto;
+extern const struct bpf_func_proto bpf_kmap_uaddr_proto;
+extern const struct bpf_func_proto bpf_kunmap_uaddr_proto;
 
 /* APIs for Trie */
 void trie_init(struct trie_node **node);
