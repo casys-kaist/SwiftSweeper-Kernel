@@ -5858,16 +5858,16 @@ union bpf_attr {
  *		The number of loops performed, **-EINVAL** for invalid **flags**,
  *		**-E2BIG** if **nr_loops** exceeds the maximum number of loops.
  *
- * void *bpf_kmap_uaddr(void *uaddr)
+ * void *bpf_kmap_uaddr(void *uaddr, size_t len)
  *	Description
- *		Map PAGE_SIZE user address to kernel address temporary.
+ *		Map user address to kernel address with length temporary.
  *	Return
  *		**Kernel Address** if the uaddr is valid.
  *		**NULL** if the uaddr is invalid.
  *
  * long bpf_kunmap_uaddr(void *ptr)
  *	Description
- *		Unmap PAGE_SIZE kernel address if the ptr is previsouly assigned user address.
+ *		Unmap kernel address if the ptr is previsouly assigned user address.
  *	Return
  *		**0** if the ptr is valid.
  *		**1** if the ptr is invalid.
