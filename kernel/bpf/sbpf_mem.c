@@ -867,11 +867,14 @@ static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux
 	int callback_ret = 0;
 	struct folio *folio;
 	void *kaddr;
+	u64 flag = 0;
 
 	folio = page_folio(pte_page(*pte));
 	kaddr = kmap_local_page(pte_page(*pte));
-	callback_ret =
-		callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx, 0, 0);
+
+	flag = pte_flags(*pte) & (_PAGE_RW | _PAGE_ACCESSED | _PAGE_DIRTY);
+	callback_ret = callback->callback((u64)kaddr, addr, (u64)callback->callback_ctx,
+					  flag, 0);
 	kunmap_local(kaddr);
 
 	switch (callback_ret) {
@@ -906,6 +909,7 @@ static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux
 	}
 
 set:
+	entry = pte_mkclean(entry);
 	set_pte_at(current->mm, addr, pte, entry);
 
 done:
