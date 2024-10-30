@@ -277,6 +277,42 @@ const struct bpf_func_proto bpf_uaddr_to_kaddr_proto = {
 	.arg2_type = ARG_CONST_ALLOC_SIZE_OR_ZERO,
 };
 
+BPF_CALL_2(bpf_kmap_uaddr, void *, uaddr, size_t, len)
+{
+	struct page *page;
+	void *kaddr;
+
+	if (get_user_pages((unsigned long)uaddr, 1, FOLL_NOFAULT, &page) <= 0)
+		return 0;
+
+	kaddr = kmap_local_page(page);
+
+	return (unsigned long)kaddr;
+}
+
+const struct bpf_func_proto bpf_kmap_uaddr_proto = {
+	.func = bpf_kmap_uaddr,
+	.gpl_only = false,
+	.ret_type = RET_PTR_TO_DYNPTR_MEM_OR_NULL,
+	.arg1_type = ARG_ANYTHING,
+	.arg2_type = ARG_CONST_ALLOC_SIZE_OR_ZERO,
+};
+
+BPF_CALL_1(bpf_kunmap_uaddr, void *, uaddr)
+{
+	put_page(virt_to_page(uaddr));
+	kunmap_local((void *)uaddr);
+
+	return 0;
+}
+
+const struct bpf_func_proto bpf_kunmap_uaddr_proto = {
+	.func = bpf_kunmap_uaddr,
+	.gpl_only = false,
+	.ret_type = RET_INTEGER,
+	.arg1_type = ARG_ANYTHING,
+};
+
 static const struct bpf_func_proto *bpf_sbpf_func_proto(enum bpf_func_id func_id,
 							const struct bpf_prog *prog)
 {
@@ -293,6 +329,10 @@ static const struct bpf_func_proto *bpf_sbpf_func_proto(enum bpf_func_id func_id
 		return &bpf_touch_page_table_proto;
 	case BPF_FUNC_iter_pte_touch:
 		return &bpf_iter_pte_touch_proto;
+	case BPF_FUNC_kmap_uaddr:
+		return &bpf_kmap_uaddr_proto;
+	case BPF_FUNC_kunmap_uaddr:
+		return &bpf_kunmap_uaddr_proto;
 	default:
 		return bpf_base_func_proto(func_id, prog);
 	}
@@ -537,7 +577,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 }
 
 static bool verify_sbpf(int off, int size, enum bpf_access_type type,
-		 const struct bpf_prog *prog, struct bpf_insn_access_aux *info)
+			const struct bpf_prog *prog, struct bpf_insn_access_aux *info)
 {
 	if (off < 0 || off + size > PAGE_SIZE)
 		return false;

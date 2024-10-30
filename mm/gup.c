@@ -2925,7 +2925,7 @@ static int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
 	struct folio *folio;
 	int refs;
 
-	if (!pud_access_permitted(orig, flags & FOLL_WRITE))
+	if (!pud_access_permitted(orig, flags & FOLL_NOFAULT))
 		return 0;
 
 	if (pud_devmap(orig)) {

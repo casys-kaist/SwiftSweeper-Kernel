@@ -9824,9 +9824,9 @@ static int set_iter_pte_callback_state(struct bpf_verifier_env *env,
 	callee->regs[BPF_REG_1].mem_size = PAGE_SIZE;
 	callee->regs[BPF_REG_2].type = SCALAR_VALUE;
 	callee->regs[BPF_REG_3] = caller->regs[BPF_REG_4];
+	callee->regs[BPF_REG_4].type = SCALAR_VALUE;
 
 	/* unused */
-	__mark_reg_not_init(env, &callee->regs[BPF_REG_4]);
 	__mark_reg_not_init(env, &callee->regs[BPF_REG_5]);
 
 	callee->in_callback_fn = true;
