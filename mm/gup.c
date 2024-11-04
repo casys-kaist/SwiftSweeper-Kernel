@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
+#include "linux/mm_types.h"
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -2925,7 +2926,7 @@ static int gup_huge_pud(pud_t orig, pud_t *pudp, unsigned long addr,
 	struct folio *folio;
 	int refs;
 
-	if (!pud_access_permitted(orig, flags & FOLL_NOFAULT))
+	if (!pud_access_permitted(orig, flags & FOLL_WRITE))
 		return 0;
 
 	if (pud_devmap(orig)) {

@@ -281,11 +281,19 @@ BPF_CALL_2(bpf_kmap_uaddr, void *, uaddr, size_t, len)
 {
 	struct page *page;
 	void *kaddr;
+	uint64_t offset;
 
-	if (get_user_pages((unsigned long)uaddr, 1, FOLL_NOFAULT, &page) <= 0)
+	uaddr = untagged_addr(uaddr);
+	offset = (uint64_t)uaddr & (PAGE_SIZE - 1);
+	uaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)uaddr);
+
+	if (get_user_pages_remote(current->mm, (unsigned long)uaddr, 1, FOLL_WRITE | FOLL_NOFAULT, &page,
+				  NULL) <= 0)
 		return 0;
 
 	kaddr = kmap_local_page(page);
+	put_page(page);
+	kaddr += offset;
 
 	return (unsigned long)kaddr;
 }
@@ -298,10 +306,10 @@ const struct bpf_func_proto bpf_kmap_uaddr_proto = {
 	.arg2_type = ARG_CONST_ALLOC_SIZE_OR_ZERO,
 };
 
-BPF_CALL_1(bpf_kunmap_uaddr, void *, uaddr)
+BPF_CALL_1(bpf_kunmap_uaddr, void *, kaddr)
 {
-	put_page(virt_to_page(uaddr));
-	kunmap_local((void *)uaddr);
+	kaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)kaddr);
+	kunmap_local(kaddr);
 
 	return 0;
 }
