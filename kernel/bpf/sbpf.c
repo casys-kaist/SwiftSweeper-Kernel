@@ -87,8 +87,6 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 	} else if (flags & FAULT_FLAG_WRITE) {
 		// If the other thread is accessing the same page, we could return
 		// to reduce the contention points.
-		if (!sbpf_mm_trylock(current->sbpf->page_fault.sbpf_mm, vaddr))
-			goto abort;
 
 		// Walk the page table and call the page fault function.
 		// __handle_page_fault do copy_on_write.
@@ -96,18 +94,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 						__handle_page_fault, sbpf, false);
 
 		// Sucessfully copy on write.
-		sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 		if (!ret) {
-			if (sbpf->wp_page_fault.prog) {
-				sbpf_fault.vaddr = fault_addr;
-				sbpf_fault.flags = flags;
-				sbpf_fault.len = PAGE_SIZE;
-				sbpf_fault.aux = sbpf->wp_page_fault.aux;
-
-				// Call page fault function.
-				ret = sbpf->wp_page_fault.prog->bpf_func(&sbpf_fault,
-									 NULL);
-			}
 			goto done;
 		}
 	}
@@ -287,8 +274,8 @@ BPF_CALL_2(bpf_kmap_uaddr, void *, uaddr, size_t, len)
 	offset = (uint64_t)uaddr & (PAGE_SIZE - 1);
 	uaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)uaddr);
 
-	if (get_user_pages_remote(current->mm, (unsigned long)uaddr, 1, FOLL_WRITE | FOLL_NOFAULT, &page,
-				  NULL) <= 0)
+	if (get_user_pages_remote(current->mm, (unsigned long)uaddr, 1,
+				  FOLL_WRITE | FOLL_NOFAULT, &page, NULL) <= 0)
 		return 0;
 
 	kaddr = kmap_local_page(page);

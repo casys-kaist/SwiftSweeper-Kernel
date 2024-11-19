@@ -38,7 +38,7 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	p4d_t *p4d;
 	pmd_t *pmd;
 	pud_t *pud;
-	pte_t *pte;
+	pte_t *ptep;
 	unsigned long next_pgd;
 	unsigned long next_p4d;
 	unsigned long next_pud;
@@ -84,14 +84,18 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						return -ENOENT;
 					}
 
-					pte = pte_offset_map(pmd, addr);
+					spinlock_t *ptl;
+					pte_t *start_pte =
+						pte_offset_map_lock(mm, pmd, addr, &ptl);
+					ptep = start_pte;
 					do {
-						if (pte_none(*pte)) {
+						if (pte_none(*ptep)) {
 							if (continue_walk)
 								continue;
+							pte_unmap_unlock(start_pte, ptl);
 							return -ENOENT;
 						}
-						ret = func(pmd, pte, addr, aux);
+						ret = func(pmd, ptep, addr, aux);
 						switch (ret) {
 						case SBPF_PTE_WALK_NEXT_PTE:
 							break;
@@ -99,13 +103,18 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 							addr = next_pmd - PAGE_SIZE;
 							break;
 						case SBPF_PTE_WALK_STOP:
+							pte_unmap_unlock(start_pte, ptl);
 							return 0;
 						default:
-							if (unlikely(ret))
+							if (unlikely(ret)) {
+								pte_unmap_unlock(
+									start_pte, ptl);
 								return ret;
+							}
 						}
-					} while (pte++, addr += PAGE_SIZE,
+					} while (ptep++, addr += PAGE_SIZE,
 						 addr != next_pmd);
+					pte_unmap_unlock(start_pte, ptl);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
 		} while (p4d++, addr = next_p4d, addr != next_pgd);
@@ -176,8 +185,10 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 
 					if (!pte && pte_alloc(mm, pmd))
 						return -ENOMEM;
-					else
-						pte = pte_offset_map(pmd, addr);
+					spinlock_t *ptl;
+					pte_t *start_pte =
+						pte_offset_map_lock(mm, pmd, addr, &ptl);
+					pte = start_pte;
 
 					do {
 						ret = func(pmd, pte, addr, aux);
@@ -185,17 +196,22 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						case SBPF_PTE_WALK_NEXT_PTE:
 							break;
 						case SBPF_PTE_WALK_NEXT_PMD:
+							pte_unmap_unlock(start_pte, ptl);
 							addr = next_pmd - PAGE_SIZE;
 							ret = 0;
 							break;
 						case SBPF_PTE_WALK_STOP:
+							pte_unmap_unlock(start_pte, ptl);
 							return 0;
 						default:
-							if (unlikely(ret))
+							if (unlikely(ret)) {
+								pte_unmap_unlock(
+									start_pte, ptl);
 								return ret;
+							}
 						}
-					} while (pte++, addr += PAGE_SIZE,
-						 addr != next_pmd);
+					} while (addr += PAGE_SIZE, addr != next_pmd);
+					pte_unmap_unlock(start_pte, ptl);
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
 		} while (p4d++, addr = next_p4d, addr != next_pgd);
@@ -737,13 +753,14 @@ static int __touch_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *_aux)
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		break;
 	case BPF_SBPF_PROT_RDONLY:
-		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
-		entry = pte_wrprotect(entry);
+		// entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
+		// entry = pte_wrprotect(entry);
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		break;
+		printk("mbpf: invalid prot %lu\n", prot);
+		return -EINVAL;
 	case BPF_SBPF_PROT_RDWR:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
-		entry = pte_mkwrite_novma(entry);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		break;
 	default:
 		printk("mbpf: invalid prot %lu\n", prot);
@@ -785,9 +802,7 @@ BPF_CALL_5(bpf_set_page_table, unsigned long, vaddr, size_t, len, unsigned long,
 	if (!current->sbpf)
 		return -EINVAL;
 
-	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_set_pte(vaddr, len, paddr, vmf_flags, prot);
-	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -806,9 +821,7 @@ BPF_CALL_2(bpf_unset_page_table, unsigned long, vaddr, size_t, len)
 	if (!current->sbpf)
 		return -EINVAL;
 
-	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_unset_pte(vaddr, len);
-	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -840,9 +853,7 @@ BPF_CALL_5(bpf_touch_page_table, unsigned long, vaddr, size_t, len, unsigned lon
 	if (!current->sbpf)
 		return -EINVAL;
 
-	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, vaddr);
 	ret = bpf_touch_pte(vaddr, len, vmf_flags, prot);
-	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, vaddr);
 
 	return ret;
 }
@@ -891,13 +902,11 @@ static int __iter_pte_none(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux
 		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		goto set;
 	case BPF_SBPF_ITER_TOUCH_RDONLY:
-		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
-		entry = pte_wrprotect(entry);
-		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
-		goto set;
+		ret = -EINVAL;
+		goto done;
 	case BPF_SBPF_ITER_TOUCH_RDWR:
 		entry = pte_clear_flags(*pte, _PAGE_PKEY_MASK);
-		entry = pte_mkwrite_novma(entry);
+		tlb_flush_pte_range(current->sbpf->tlb, addr, PAGE_SIZE);
 		goto set;
 	case BPF_SBPF_ITER_TOUCH_STOP:
 		ret = SBPF_PTE_WALK_STOP;
@@ -992,7 +1001,7 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 	start_vaddr = (void *)PAGE_ALIGN_DOWN((unsigned long)start_vaddr);
 
 	// Create a new page table entry for the given address range.
-	sbpf_mm_lock(current->sbpf->page_fault.sbpf_mm, (unsigned long)start_vaddr);
+	// We have to lock the page table to prevent the page fault handler from modifying the page table.
 	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
 		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
 						 (unsigned long)start_vaddr + len,
@@ -1002,7 +1011,6 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 						(unsigned long)start_vaddr + len,
 						__iter_pte_none, &aux, true);
 	}
-	sbpf_mm_unlock(current->sbpf->page_fault.sbpf_mm, (unsigned long)start_vaddr);
 
 	return ret;
 }
