@@ -112,8 +112,8 @@ void sbpf_reverse_dump(struct sbpf_reverse_map *map);
 
 /* APIs for page table management */
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long addr, unsigned long end,
-			      pte_func func, void *aux, bool continue_walk);
+			      pte_func func, void *aux, bool continue_walk, bool nolock);
 int touch_page_table_pte_range(struct mm_struct *mm, unsigned long addr,
-			       unsigned long end, pte_func func, void *aux);
+			       unsigned long end, pte_func func, void *aux, bool nolock);
 struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_folio);
 #endif

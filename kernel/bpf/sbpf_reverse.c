@@ -12,8 +12,8 @@
 void *sbpf_reverse_init(unsigned long paddr)
 {
 	struct sbpf_reverse_map *map =
-		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL);
-	struct maple_tree *mt = kmalloc(sizeof(struct maple_tree), GFP_KERNEL);
+		kmalloc(sizeof(struct sbpf_reverse_map), GFP_KERNEL | GFP_ATOMIC);
+	struct maple_tree *mt = kmalloc(sizeof(struct maple_tree), GFP_KERNEL | GFP_ATOMIC);
 
 	mt_init(mt);
 	map->mt = mt;
@@ -348,7 +348,7 @@ struct sbpf_reverse_map *sbpf_reverse_dup(struct sbpf_reverse_map *src)
 
 	dst = __sbpf_reverse_init(src->paddr);
 	list_for_each_entry (cur, &src->elem, list) {
-		new = kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL);
+		new = kmalloc(sizeof(struct sbpf_reverse_map_elem), GFP_KERNEL | GFP_ATOMIC);
 		new->start = cur->start;
 		new->end = cur->end;
 

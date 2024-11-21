@@ -11,6 +11,8 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/radix-tree.h>
+#include <linux/mmap_lock.h>
+#include <linux/preempt.h>
 #include <asm/tlb.h>
 
 #include "sbpf_mem.h"
@@ -21,9 +23,11 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 	int ret = -EINVAL;
 	struct mmu_gather tlb;
 
+	mmap_read_lock(current->mm);
+	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
+
 	tlb_gather_mmu(&tlb, current->mm);
 	current->sbpf->tlb = &tlb;
-	read_lock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (arg_ptr != NULL && prog != NULL &&
 	    copy_from_user(current->sbpf->sbpf_func.arg, arg_ptr, arg_len)) {
@@ -35,6 +39,7 @@ int sbpf_call_function(struct bpf_prog *prog, void *arg_ptr, size_t arg_len)
 	tlb_finish_mmu(&tlb);
 done:
 	read_unlock(&current->sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
+	mmap_read_unlock(current->mm);
 
 	return ret;
 }
@@ -91,7 +96,7 @@ int sbpf_handle_page_fault(struct sbpf_task *sbpf, struct vm_area_struct *vma,
 		// Walk the page table and call the page fault function.
 		// __handle_page_fault do copy_on_write.
 		ret = walk_page_table_pte_range(current->mm, vaddr, vaddr + PAGE_SIZE,
-						__handle_page_fault, sbpf, false);
+						__handle_page_fault, sbpf, false, true);
 
 		// Sucessfully copy on write.
 		if (!ret) {
@@ -166,6 +171,8 @@ static struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	if (!current->sbpf)
 		return NULL;
 
+	mmap_assert_locked(current->mm);
+
 	uaddr = untagged_addr(uaddr);
 	offset = (uint64_t)uaddr & (PAGE_SIZE - 1);
 	uaddr = (void *)PAGE_ALIGN_DOWN((uint64_t)uaddr);
@@ -184,7 +191,7 @@ static struct sbpf_alloc_kmem *uaddr_to_kaddr(void *uaddr, size_t len)
 	pages = kmalloc_array(nr_pages, sizeof(struct page *), GFP_KERNEL | GFP_ATOMIC);
 
 	ret = get_user_pages_remote(current->mm, (unsigned long)uaddr, nr_pages,
-				    FOLL_WRITE, pages, NULL);
+				    FOLL_WRITE | FOLL_NOFAULT, pages, NULL);
 	if (ret <= 0 || ret != nr_pages)
 		goto err;
 
@@ -357,17 +364,18 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	sbpf->page_fault.prog = prog;
 	bpf_prog_inc(prog);
 
-	sbpf->page_fault.sbpf_mm = kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL);
+	sbpf->page_fault.sbpf_mm =
+		kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL | GFP_ATOMIC);
 	sbpf->page_fault.sbpf_mm->user_shared_pages =
-		kmalloc(sizeof(struct radix_tree_root), GFP_KERNEL);
+		kmalloc(sizeof(struct radix_tree_root), GFP_KERNEL | GFP_ATOMIC);
 
 	sbpf->page_fault.sbpf_mm->parent = NULL;
 	INIT_LIST_HEAD(&current->sbpf->page_fault.sbpf_mm->children);
 	INIT_RADIX_TREE(sbpf->page_fault.sbpf_mm->user_shared_pages, GFP_KERNEL);
 	atomic_set(&sbpf->page_fault.sbpf_mm->refcnt, 1);
+	rwlock_init(&sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 	for (int i = 0; i < PGTABLE_LOCK_SIZE; i++)
 		spin_lock_init(&sbpf->page_fault.sbpf_mm->pgtable_locks[i]);
-	rwlock_init(&sbpf->page_fault.sbpf_mm->user_shared_pages_lock);
 
 	if (aux_ptr) {
 		aux_page = uaddr_to_kaddr(aux_ptr, PAGE_SIZE);
@@ -422,6 +430,8 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 
 	sbpf = current->sbpf;
 
+	mmap_write_lock_killable(current->mm);
+
 	if (attr->link_create.attach_type == BPF_SBPF_PAGE_FAULT) {
 		init_sbpf_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
 	} else if (attr->link_create.attach_type == BPF_SBPF_FUNCTION) {
@@ -429,7 +439,8 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 	} else if (attr->link_create.attach_type == BPF_SBPF_WP_PAGE_FAULT) {
 		init_sbpf_wp_page_fault(sbpf, attr->link_create.sbpf.aux_ptr, prog);
 	} else {
-		return -EINVAL;
+		err = -EINVAL;
+		goto out_sbpf;
 	}
 
 	link = kzalloc(sizeof(*link), GFP_USER);
@@ -446,9 +457,12 @@ int bpf_sbpf_link_attach(const union bpf_attr *attr, struct bpf_prog *prog)
 		goto out_sbpf;
 	}
 
+	mmap_write_unlock(current->mm);
+
 	return bpf_link_settle(&link_primer);
 
 out_sbpf:
+	mmap_write_unlock(current->mm);
 
 	return err;
 }

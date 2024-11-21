@@ -15,6 +15,7 @@
 #include <linux/errno.h>
 #include <linux/list.h>
 #include <linux/pgtable.h>
+#include <linux/mmap_lock.h>
 #include <asm/tlb.h>
 #include <asm-generic/pgalloc.h>
 
@@ -31,7 +32,7 @@
  */
 int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 			      unsigned long end, pte_func func, void *aux,
-			      bool continue_walk)
+			      bool continue_walk, bool nolock)
 {
 	int ret;
 	pgd_t *pgd;
@@ -44,6 +45,8 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 	unsigned long next_pud;
 	unsigned long next_pmd;
 	unsigned long addr = start & PAGE_MASK;
+	spinlock_t *ptl;
+	pte_t *start_pte;
 
 	if (start >= end || !mm || !func)
 		return -EINVAL;
@@ -84,16 +87,25 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 						return -ENOENT;
 					}
 
-					spinlock_t *ptl;
-					pte_t *start_pte =
-						pte_offset_map_lock(mm, pmd, addr, &ptl);
+					if (!nolock) {
+						start_pte = pte_offset_map_lock(
+							mm, pmd, addr, &ptl);
+					} else {
+						start_pte = pte_offset_map(pmd, addr);
+					}
+					if (!start_pte) {
+						if (continue_walk)
+							continue;
+						return -ENOENT;
+					}
 					ptep = start_pte;
+
 					do {
 						if (pte_none(*ptep)) {
 							if (continue_walk)
 								continue;
-							pte_unmap_unlock(start_pte, ptl);
-							return -ENOENT;
+							ret = -ENOENT;
+							goto ret_unlock;
 						}
 						ret = func(pmd, ptep, addr, aux);
 						switch (ret) {
@@ -103,24 +115,36 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 							addr = next_pmd - PAGE_SIZE;
 							break;
 						case SBPF_PTE_WALK_STOP:
-							pte_unmap_unlock(start_pte, ptl);
+							ret = 0;
+							goto ret_unlock;
 							return 0;
 						default:
 							if (unlikely(ret)) {
-								pte_unmap_unlock(
-									start_pte, ptl);
-								return ret;
+								goto ret_unlock;
 							}
 						}
 					} while (ptep++, addr += PAGE_SIZE,
 						 addr != next_pmd);
-					pte_unmap_unlock(start_pte, ptl);
+
+					if (!nolock)
+						pte_unmap_unlock(start_pte, ptl);
+					else
+						pte_unmap(start_pte);
+
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
 		} while (p4d++, addr = next_p4d, addr != next_pgd);
 	} while (pgd++, addr = next_pgd, addr != end);
 
 	return 0;
+
+ret_unlock:
+	if (!nolock)
+		pte_unmap_unlock(start_pte, ptl);
+	else
+		pte_unmap(start_pte);
+
+	return ret;
 }
 
 /**
@@ -133,19 +157,20 @@ int walk_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 * Negative value: Return the value as an error code.
 */
 int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
-			       unsigned long end, pte_func func, void *aux)
+			       unsigned long end, pte_func func, void *aux, bool nolock)
 {
 	int ret;
 	pgd_t *pgd;
 	p4d_t *p4d;
 	pmd_t *pmd;
 	pud_t *pud;
-	pte_t *pte;
-	pte_t orig_pte;
+	pte_t *ptep;
 	unsigned long next_pgd;
 	unsigned long next_p4d;
 	unsigned long next_pud;
 	unsigned long next_pmd;
+	spinlock_t *ptl;
+	pte_t *start_pte;
 
 	unsigned long addr = start & PAGE_MASK;
 
@@ -171,53 +196,62 @@ int touch_page_table_pte_range(struct mm_struct *mm, unsigned long start,
 					return -ENOMEM;
 				do {
 					next_pmd = pmd_addr_end(addr, next_pud);
-					if (unlikely(pmd_none(*pmd)))
-						pte = NULL;
-					else {
-						pte = pte_offset_map(pmd, addr);
-						orig_pte = *pte;
-						barrier();
-						if (pte_none(orig_pte)) {
-							pte_unmap(pte);
-							pte = NULL;
-						}
+
+					if (unlikely(pmd_none(*pmd))) {
+						if (pte_alloc(mm, pmd))
+							return -ENOMEM;
 					}
 
-					if (!pte && pte_alloc(mm, pmd))
-						return -ENOMEM;
-					spinlock_t *ptl;
-					pte_t *start_pte =
-						pte_offset_map_lock(mm, pmd, addr, &ptl);
-					pte = start_pte;
+					if (!nolock) {
+						start_pte = pte_offset_map_lock(
+							mm, pmd, addr, &ptl);
+					} else {
+						start_pte = pte_offset_map(pmd, addr);
+					}
+
+					if (!start_pte)
+						return -ENOENT;
+					ptep = start_pte;
 
 					do {
-						ret = func(pmd, pte, addr, aux);
+						ret = func(pmd, ptep, addr, aux);
 						switch (ret) {
 						case SBPF_PTE_WALK_NEXT_PTE:
 							break;
 						case SBPF_PTE_WALK_NEXT_PMD:
-							pte_unmap_unlock(start_pte, ptl);
 							addr = next_pmd - PAGE_SIZE;
 							ret = 0;
 							break;
 						case SBPF_PTE_WALK_STOP:
-							pte_unmap_unlock(start_pte, ptl);
-							return 0;
+							ret = 0;
+							goto ret_unlock;
 						default:
 							if (unlikely(ret)) {
-								pte_unmap_unlock(
-									start_pte, ptl);
-								return ret;
+								goto ret_unlock;
 							}
 						}
-					} while (addr += PAGE_SIZE, addr != next_pmd);
-					pte_unmap_unlock(start_pte, ptl);
+					} while (ptep++, addr += PAGE_SIZE,
+						 addr != next_pmd);
+
+					if (!nolock)
+						pte_unmap_unlock(start_pte, ptl);
+					else
+						pte_unmap(start_pte);
+
 				} while (pmd++, addr = next_pmd, addr != next_pud);
 			} while (pud++, addr = next_pud, addr != next_p4d);
 		} while (p4d++, addr = next_p4d, addr != next_pgd);
 	} while (pgd++, addr = next_pgd, addr != end);
 
 	return 0;
+
+ret_unlock:
+	if (!nolock)
+		pte_unmap_unlock(start_pte, ptl);
+	else
+		pte_unmap(start_pte);
+
+	return ret;
 }
 
 static int __get_wp_pte(pmd_t *pmd, pte_t *pte, unsigned long addr, void *aux)
@@ -317,7 +351,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 		aux.entry = &entry;
 		aux.update_pmd = false;
 		ret = walk_page_table_pte_range(current->mm, paddr, paddr + PAGE_SIZE,
-						__set_write, &aux, false);
+						__set_write, &aux, false, false);
 		if (unlikely(ret)) {
 			printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n", ret,
 			       paddr, paddr + PAGE_SIZE);
@@ -334,7 +368,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 	// We have to make the parent page as a read only.
 	if ((unsigned long)orig_folio->page.sbpf_reverse->size !=
 	    folio_ref_count(orig_folio)) {
-		folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+		folio = folio_alloc(GFP_USER | GFP_ATOMIC | __GFP_ZERO, 0);
 		inc_mm_counter(current->mm, MM_ANONPAGES);
 		folio_set_mbpf(folio);
 		if (unlikely(!folio))
@@ -369,7 +403,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 #else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-							__set_pte, &aux, false);
+							__set_pte, &aux, false, false);
 			if (unlikely(ret)) {
 				printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n",
 				       ret, cur->start, cur->end);
@@ -404,7 +438,7 @@ struct folio *sbpf_mem_copy_on_write(struct sbpf_task *sbpf, struct folio *orig_
 #else
 		list_for_each_entry (cur, &folio->page.sbpf_reverse->elem, list) {
 			ret = walk_page_table_pte_range(current->mm, cur->start, cur->end,
-							__set_write, &aux, false);
+							__set_write, &aux, false, false);
 			if (unlikely(ret)) {
 				printk("mbpf: set addr range failed (%d): [0x%lx, 0x%lx)\n",
 				       ret, cur->start, cur->end);
@@ -458,10 +492,10 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 	// Note that, paddr (sbpf physical address) starts from 1 and 0 means zero page (Not fixed yet).
 	// This optimization slows down the overall performance. Disable temporary before delete.
 	ret = walk_page_table_pte_range(mm, paddr, paddr + PAGE_SIZE, __get_wp_pte,
-					&entry, false);
+					&entry, false, true);
 	if (ret) {
 		if (likely(ret == -ENOENT)) {
-			folio = folio_alloc(GFP_USER | __GFP_ZERO, 0);
+			folio = folio_alloc(GFP_USER | GFP_ATOMIC | __GFP_ZERO, 0);
 			if (unlikely(!folio))
 				return -ENOMEM;
 
@@ -479,13 +513,14 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 			if (paddr != vaddr) {
 				ret = touch_page_table_pte_range(current->mm, paddr,
 								 paddr + PAGE_SIZE,
-								 __set_pte, &aux);
+								 __set_pte, &aux, true);
 				ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse,
 								 paddr,
 								 paddr + PAGE_SIZE);
 			} else {
-				ret = touch_page_table_pte_range(
-					current->mm, paddr, paddr + len, __set_pte, &aux);
+				ret = touch_page_table_pte_range(current->mm, paddr,
+								 paddr + len, __set_pte,
+								 &aux, true);
 				ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse,
 								 paddr, paddr + len);
 			}
@@ -515,7 +550,7 @@ static int bpf_set_pte(unsigned long vaddr, size_t len, unsigned long paddr,
 
 	if (paddr != vaddr) {
 		ret = touch_page_table_pte_range(current->mm, vaddr, vaddr + len,
-						 __set_pte, &aux);
+						 __set_pte, &aux, true);
 		ret |= sbpf_reverse_insert_range(folio->page.sbpf_reverse, vaddr,
 						 vaddr + len);
 		if (unlikely(ret)) {
@@ -718,11 +753,11 @@ static int bpf_unset_pte(unsigned long address, size_t len)
 	address = address & PAGE_MASK;
 	if (len == PAGE_SIZE) {
 		ret = walk_page_table_pte_range(mm, address, address + len,
-						__unset_pte_single, NULL, true);
+						__unset_pte_single, NULL, true, true);
 	} else {
 		aux.folio = NULL;
 		ret = walk_page_table_pte_range(mm, address, address + len, __unset_pte,
-						&aux, true);
+						&aux, true, true);
 		if (aux.folio && likely(!ret)) {
 			ret = unset_trie_entry(aux.start_addr, aux.end_addr, aux.folio);
 			folio_put_refs(aux.folio,
@@ -785,7 +820,7 @@ static int bpf_touch_pte(unsigned long address, size_t len, unsigned long vmf_fl
 	address = address & PAGE_MASK;
 
 	ret = walk_page_table_pte_range(mm, address, address + len, __touch_pte,
-					(void *)prot, true);
+					(void *)prot, true, true);
 	if (unlikely(ret))
 		printk("mbpf: touch page pte failed (%d) (addr : 0x%lx, len : 0x%lx)\n",
 		       ret, address, len);
@@ -1005,11 +1040,11 @@ BPF_CALL_5(bpf_iter_pte_touch, void *, start_vaddr, u64, len, void *, callback_f
 	if (flag == BPF_SBPF_ITER_FLAG_CREATE) {
 		ret = touch_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
 						 (unsigned long)start_vaddr + len,
-						 __iter_pte_create, &aux);
+						 __iter_pte_create, &aux, true);
 	} else {
 		ret = walk_page_table_pte_range(current->mm, (unsigned long)start_vaddr,
 						(unsigned long)start_vaddr + len,
-						__iter_pte_none, &aux, true);
+						__iter_pte_none, &aux, true, true);
 	}
 
 	return ret;
