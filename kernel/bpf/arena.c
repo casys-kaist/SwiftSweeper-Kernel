@@ -171,8 +171,9 @@ static void arena_map_free(struct bpf_map *map)
 	 * munmap() must have happened on vma followed by arena_vm_close()
 	 * which would clear arena->vma_list.
 	 */
-	if (WARN_ON_ONCE(!list_empty(&arena->vma_list)))
-		return;
+	// Temporary fix for the internal kernel bug (by Junho Ahn).
+	// if (WARN_ON_ONCE(!list_empty(&arena->vma_list)))
+	// 	return;
 
 	/*
 	 * free_vm_area() calls remove_vm_area() that calls free_unmap_vmap_area().
@@ -232,6 +233,9 @@ static void arena_vm_close(struct vm_area_struct *vma)
 	struct bpf_map *map = vma->vm_file->private_data;
 	struct bpf_arena *arena = container_of(map, struct bpf_arena, map);
 	struct vma_list *vml;
+
+	// Temporary fix for the internal kernel bug (by Junho Ahn)
+	return;
 
 	guard(mutex)(&arena->lock);
 	vml = vma->vm_private_data;

@@ -362,7 +362,6 @@ static int init_sbpf_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	off_t offset;
 
 	sbpf->page_fault.prog = prog;
-	bpf_prog_inc(prog);
 
 	sbpf->page_fault.sbpf_mm =
 		kmalloc(sizeof(struct sbpf_mm_struct), GFP_KERNEL | GFP_ATOMIC);
@@ -393,8 +392,6 @@ static int init_sbpf_function(struct sbpf_task *sbpf, struct bpf_prog *prog)
 	sbpf->sbpf_func.prog = prog;
 	sbpf->sbpf_func.arg = kmalloc(PAGE_SIZE, GFP_KERNEL | __GFP_ZERO);
 
-	bpf_prog_inc(prog);
-
 	return 0;
 }
 
@@ -412,8 +409,6 @@ static int init_sbpf_wp_page_fault(struct sbpf_task *sbpf, void *aux_ptr,
 	} else {
 		sbpf->wp_page_fault.aux = NULL;
 	}
-
-	bpf_prog_inc(prog);
 
 	return 0;
 }
@@ -544,7 +539,6 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 			tsk->sbpf->page_fault.aux = old_sbpf->page_fault.aux;
 			tsk->sbpf->page_fault.prog = old_sbpf->page_fault.prog;
 			atomic_inc(&tsk->sbpf->page_fault.sbpf_mm->refcnt);
-			bpf_prog_inc(tsk->sbpf->page_fault.prog);
 		} else {
 			init_sbpf_page_fault(tsk->sbpf, NULL, old_sbpf->page_fault.prog);
 			tsk->sbpf->page_fault.aux = old_sbpf->page_fault.aux;
@@ -553,6 +547,7 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 			list_add(&tsk->sbpf->page_fault.sbpf_mm->elem,
 				 &old_sbpf->page_fault.sbpf_mm->children);
 		}
+		bpf_prog_inc(tsk->sbpf->page_fault.prog);
 	} else {
 		// Currently, we do not support the case that the parent process does not have a page fault function.
 		return -EINVAL;
@@ -560,11 +555,13 @@ int copy_sbpf(unsigned long clone_flags, struct task_struct *tsk)
 
 	if (old_sbpf->sbpf_func.prog != NULL) {
 		init_sbpf_function(tsk->sbpf, old_sbpf->sbpf_func.prog);
+		bpf_prog_inc(tsk->sbpf->sbpf_func.prog);
 		memcpy(tsk->sbpf->sbpf_func.arg, old_sbpf->sbpf_func.arg, PAGE_SIZE);
 	}
 
 	if (old_sbpf->wp_page_fault.prog != NULL) {
 		init_sbpf_wp_page_fault(tsk->sbpf, NULL, old_sbpf->wp_page_fault.prog);
+		bpf_prog_inc(tsk->sbpf->wp_page_fault.prog);
 		tsk->sbpf->wp_page_fault.aux = old_sbpf->wp_page_fault.aux;
 	}
 
