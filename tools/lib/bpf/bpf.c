@@ -832,6 +832,7 @@ int bpf_link_create(int prog_fd, int target_fd,
 		attr.link_create.netkit.expected_revision = OPTS_GET(opts, netkit.expected_revision, 0);
 		if (!OPTS_ZEROED(opts, netkit))
 			return libbpf_err(-EINVAL);
+	case BPF_SBPF_FUNCTION:
 	case BPF_SBPF_PAGE_FAULT:
 	case BPF_SBPF_WP_PAGE_FAULT:
 		attr.link_create.sbpf.aux_ptr = OPTS_GET(opts, sbpf.aux_ptr, 0);

@@ -483,22 +483,20 @@ static void release_sbpf_mm(struct task_struct *tsk, struct sbpf_mm_struct *sbpf
 
 static void release_sbpf(struct task_struct *tsk, struct sbpf_task *sbpf)
 {
-	if (!atomic_dec_and_test(&sbpf->ref)) {
-		if (sbpf->sbpf_func.prog) {
-			bpf_prog_put(sbpf->sbpf_func.prog);
-		}
-
-		if (sbpf->wp_page_fault.prog) {
-			bpf_prog_put(sbpf->wp_page_fault.prog);
-		}
-
-		if (sbpf->page_fault.prog) {
-			bpf_prog_put(sbpf->page_fault.prog);
-		}
-
-		release_sbpf_mm(tsk, sbpf->page_fault.sbpf_mm);
-		kfree(sbpf);
+	if (sbpf->sbpf_func.prog) {
+		bpf_prog_put(sbpf->sbpf_func.prog);
 	}
+
+	if (sbpf->wp_page_fault.prog) {
+		bpf_prog_put(sbpf->wp_page_fault.prog);
+	}
+
+	if (sbpf->page_fault.prog) {
+		bpf_prog_put(sbpf->page_fault.prog);
+	}
+
+	release_sbpf_mm(tsk, sbpf->page_fault.sbpf_mm);
+	kfree(sbpf);
 }
 
 int copy_sbpf_page(struct vm_area_struct *dst_vma, struct vm_area_struct *src_vma,

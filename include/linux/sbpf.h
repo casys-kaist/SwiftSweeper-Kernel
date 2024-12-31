@@ -31,9 +31,6 @@ struct profile_t {
 
 /* generic task struct for handling BUDAlloc bpf program */
 struct sbpf_task {
-	// Used for reference counting of sbpf_task produced by the fork.
-	atomic_t ref;
-
 	// Used for handling sbpf function.
 	struct {
 		struct bpf_prog *prog;
